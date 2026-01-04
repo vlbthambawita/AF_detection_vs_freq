@@ -1,29 +1,53 @@
 """
-ecg_data_preprocessor.py
+ECG DATA PREPARATION PIPELINE FOR AF DETECTION
+=============================================
 
-Universal ECG preprocessing 
-----------------------------------
-This script serves as the global standard for ECG signal processing in this pipeline. 
-It handles resampling, normalization, segmentation, and patient-safe balancing.
-This logic is finalized and should not be modified unless implementing global feature updates 
-for example, lead selection or multi-label support.
+This module implements a leakage-safe, patient-level ECG preprocessing and
+dataset construction pipeline designed for deep-learning–based atrial
+fibrillation (AF) detection.
 
-what this script/pipeline do:
-- Convert raw ECG records into clean, fixed-length segments(10s) if they are not already.
-- Resample to multiple target sampling rates for example 500/250/100 Hz or any other rates.
-    (the pipeline does NOT resample when the original sampling rate already matches the target).
-- Enforce patient-safe splitting (train/val/test or K-fold)
-- Apply record-level AFIB vs NORMAL balancing
-- Save processed tensors (.pt) and metadata (.csv)
+WHAT THIS PIPELINE DOES
+-----------------------
+• Enforces strict patient-level separation to prevent data leakage across
+  train/validation/test splits or cross-validation folds.
+• Supports both standard splits and patient-safe K-fold cross-validation.
+• Cleans numerical artifacts by replacing NaN and Inf values.
+• Resamples ECG signals to standardized sampling rates (e.g., 500, 250, 100 Hz)
+  for multi-resolution modeling.
+• Applies robust signal-quality corrections:
+    - Zeroing flatline leads caused by sensor failure.
+    - Clipping extreme amplitude outliers to stabilize training.
+• Applies per-lead z-score normalization (zero mean, unit variance) to remove
+  inter-patient amplitude bias while preserving ECG morphology.
+• Segments ECG signals into fixed-length windows suitable for CNN, LSTM, and
+  hybrid deep-learning models.
+• Supports medically safe class balancing strategies (record-level, segment-
+  level, train-only, and fold-level) without introducing patient leakage.
+• Saves processed data and metadata in PyTorch-friendly formats.
 
-Leakage safaty garantee
--------------------------------------------------------------------------------
-- Patients are the main unit of splitting.
-- No patient ever appears in more than one fold or split.
-- Segments inherit the patient assignment of their parent record.
-- PTB-XL official strat_fold is respected when folds=10.
+WHAT THIS PIPELINE DOES NOT DO
+------------------------------
+• Does NOT apply classical frequency-domain filtering (e.g., band-pass,
+  high-pass, or notch filters).
+• Does NOT perform baseline wander removal or powerline interference filtering.
+• Does NOT modify ECG morphology using handcrafted signal-processing filters.
+• Does NOT apply SMOTE or synthetic sample generation on raw ECG signals.
+• Does NOT balance or modify validation or test sets.
+• Does NOT mix samples from the same patient across different splits or folds.
 
+DESIGN RATIONALE
+----------------
+This pipeline intentionally avoids traditional ECG filtering to allow deep
+learning models (CNNs, LSTMs, Transformers) to learn task-specific temporal and
+morphological representations directly from standardized signals. Robust
+numerical sanitation, artifact suppression, and statistical normalization are
+used instead to ensure training stability and physiological plausibility.
+
+The output datasets are optimized for ensemble-based AF detection models that
+combine spatial (multi-lead morphology) and temporal (rhythm irregularity)
+information in a medically and statistically sound manner.
 """
+
 
 import os
 import csv
