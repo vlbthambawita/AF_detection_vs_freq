@@ -12,8 +12,8 @@ WHAT THIS PIPELINE DOES
   train/validation/test splits or cross-validation folds.
 • Supports both standard splits and patient-safe K-fold cross-validation.
 • Cleans numerical artifacts by replacing NaN and Inf values.
-• Resamples ECG signals to standardized sampling rates (e.g., 500, 250, 100 Hz)
-  for multi-resolution modeling.
+• Resamples ECG signals to standardized sampling rates (e.g., 500, 250, 100 Hz) 
+    for multi-resolution modeling.
 • Applies robust signal-quality corrections:
     - Zeroing flatline leads caused by sensor failure.
     - Clipping extreme amplitude outliers to stabilize training.
