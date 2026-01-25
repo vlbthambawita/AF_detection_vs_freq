@@ -1,0 +1,109 @@
+
+================================================================================
+AFIB Detection Model Results
+================================================================================
+Model Name:        1D-CNN-125Hz
+Sample Rate:       125.0 Hz (Original: 500 Hz, Downsample: 4x)
+Batch Size:        32
+Learning Rate:     0.001
+Num Epochs:        30
+Device:            cuda
+Timestamp:         2026-01-14_14-08-22
+
+================================================================================
+Test Set Metrics
+================================================================================
+Accuracy (Acc):    0.9873
+F1-Score (F1):     0.9860
+Precision (Pre):   0.9819
+Recall (Rec):      0.9930
+Specificity (Spec):0.9817
+Matthews Corr Coef:0.9747
+ROC-AUC (AUC):     0.9974
+
+Test Loss:         0.0488
+
+================================================================================
+Confusion Matrix
+================================================================================
+                  Predicted
+               Non-AFIB  AFIB
+Actual Non-AFIB     697      13
+       AFIB           5     707
+
+TP (True Positive):   707
+TN (True Negative):   697
+FP (False Positive):  13
+FN (False Negative):  5
+
+================================================================================
+Per-Fold Performance Analysis
+================================================================================
+
+Fold 0:
+  Samples:      711
+  AUC:         0.9990
+  Accuracy:    0.9859
+  MCC:         0.9719
+  Precision:   0.9860
+  Recall:      0.9860
+  Specificity: 0.9859
+  F1-Score:    0.9860
+  Confusion Matrix: TN=350  FP=  5  FN=  5  TP=351
+
+Fold 1:
+  Samples:      711
+  AUC:         0.9958
+  Accuracy:    0.9887
+  MCC:         0.9777
+  Precision:   0.9780
+  Recall:      1.0000
+  Specificity: 0.9775
+  F1-Score:    0.9889
+  Confusion Matrix: TN=347  FP=  8  FN=  0  TP=356
+
+Fold 2:
+  Samples:      711
+  AUC:         1.0000
+  Accuracy:    1.0000
+  MCC:         1.0000
+  Precision:   1.0000
+  Recall:      1.0000
+  Specificity: 1.0000
+  F1-Score:    1.0000
+  Confusion Matrix: TN=355  FP=  0  FN=  0  TP=356
+
+Fold 3:
+  Samples:      711
+  AUC:         1.0000
+  Accuracy:    1.0000
+  MCC:         1.0000
+  Precision:   1.0000
+  Recall:      1.0000
+  Specificity: 1.0000
+  F1-Score:    1.0000
+  Confusion Matrix: TN=355  FP=  0  FN=  0  TP=356
+
+Fold 4:
+  Samples:      711
+  AUC:         0.9995
+  Accuracy:    0.9859
+  MCC:         0.9719
+  Precision:   0.9806
+  Recall:      0.9916
+  Specificity: 0.9803
+  F1-Score:    0.9860
+  Confusion Matrix: TN=348  FP=  7  FN=  3  TP=353
+
+Summary Statistics Across Folds:
+  Mean AUC:         0.9988 +- 0.0016
+  Mean Accuracy:    0.9921 +- 0.0065
+  Mean Specificity: 0.9887 +- 0.0096
+  Mean MCC:         0.9843 +- 0.0130
+  Min AUC:          0.9958 (Fold 1)
+  Max AUC:          1.0000 (Fold 2)
+  Min MCC:          0.9719 (Fold 0)
+  Max MCC:          1.0000 (Fold 2)
+
+
+================================================================================
