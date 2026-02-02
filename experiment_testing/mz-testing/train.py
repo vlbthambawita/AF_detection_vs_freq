@@ -266,6 +266,11 @@ def train_one_fold(model, optimizer, train_loader, val_loader, device, out_dir):
     specificity = tn / (tn + fp + 1e-12)
     precision = tp / (tp + fp + 1e-12)
 
+    mcc_num = (tp * tn) - (fp * fn)
+    mcc_den = ((tp+fp)*(tp+fn)*(tn+fp)*(tn+fn)) ** 0.5 + 1e-12
+    mcc = mcc_num / mcc_den
+
+
     with open(metrics_path, "w") as f:
         f.write("BEST VALIDATION METRICS (PER FOLD)\n")
         f.write("=" * 60 + "\n\n")
@@ -283,13 +288,36 @@ def train_one_fold(model, optimizer, train_loader, val_loader, device, out_dir):
         f.write("DERIVED METRICS\n")
         f.write(f"Recall (Sensitivity): {recall:.4f}\n")
         f.write(f"Specificity        : {specificity:.4f}\n")
-        f.write(f"Precision          : {precision:.4f}\n\n")
+        f.write(f"Precision          : {precision:.4f}\n")
+        f.write(f"MCC                : {mcc:.4f}\n\n")
+
+        f.write("RUNTIME\n")
+        f.write(f"Fold training time (sec): {fold_time:.2f}\n")
+        f.write(f"Fold training time (min): {fold_time/60:.2f}\n\n")
 
         f.write("RUN INFO\n")
         f.write("-" * 60 + "\n")
         f.write("Random seed        : 42\n")
 
-    return best_f1
+
+    return {
+        "fold": out_dir.name,                 # e.g., fold_1
+        "best_epoch": best_epoch,
+        "val_loss": float(best_val_loss),
+
+        "accuracy": float(best_acc),
+        "f1": float(best_f1),
+        "recall": float(recall),
+        "specificity": float(specificity),
+        "precision": float(precision),
+        "mcc": float(mcc),
+
+        "tn": int(tn), "fp": int(fp),
+        "fn": int(fn), "tp": int(tp),
+
+        "time_min": float(fold_time / 60.0),
+    }
+
 
 
 # ============================ MAIN ============================
@@ -324,6 +352,8 @@ def main():
     best_f1_overall = -1
 
     training_start = time.time()
+    fold_results = []
+
 
     # ---------- K-FOLD LOOP ----------
     for fold in range(1, KFOLDS + 1):
@@ -353,7 +383,7 @@ def main():
 
         optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-        fold_f1 = train_one_fold(
+        metrics = train_one_fold(
             model,
             optimizer,
             train_loader,
@@ -362,13 +392,98 @@ def main():
             Path("checkpoints") / dataset_name / f"{fs}hz" / args.model / f"fold_{fold}",
         )
 
-        if fold_f1 > best_f1_overall:
-            best_f1_overall = fold_f1
+        fold_results.append(metrics)
+        
+
+
+        if metrics["f1"] > best_f1_overall:
+            best_f1_overall = metrics["f1"]
             best_fold = fold
+
 
     training_total_time = time.time() - training_start
     training_total_min = training_total_time / 60
     print(f"Total training time : {training_total_min:.2f} minutes")
+
+    
+
+
+    table_path = (
+        Path("checkpoints")
+        / dataset_name
+        / "validation_table.txt"  # one master table per dataset
+    )
+
+    write_header = not table_path.exists()
+
+    # Frequency string exactly like screenshot: "500 Hz"
+    freq_str = f"{fs} Hz"
+    model_str = args.model  # e.g., "cnn1d", "cnn_lstm"
+
+    # averages
+    acc_avg  = float(np.mean([r["accuracy"] for r in fold_results]))
+    f1_avg   = float(np.mean([r["f1"] for r in fold_results]))
+    prec_avg = float(np.mean([r["precision"] for r in fold_results]))
+    spec_avg = float(np.mean([r["specificity"] for r in fold_results]))
+    mcc_avg  = float(np.mean([r["mcc"] for r in fold_results]))
+    time_avg = float(np.mean([r["time_min"] for r in fold_results]))
+
+    with open(table_path, "a") as f:
+        if write_header:
+            f.write("VALIDATION PERFORMANCE ACROSS SAMPLING FREQUENCIES (5-FOLD)\n")
+            f.write("=" * 140 + "\n\n")
+            f.write(
+                f"{'Model':<10}"
+                f"{'Freq':<10}"
+                f"{'Fold':<10}"
+                f"{'Acc':<10}"
+                f"{'F1':<10}"
+                f"{'Prec':<10}"
+                f"{'Spec':<10}"
+                f"{'MCC':<10}"
+                f"{'Time':<10}\n"
+            )
+            f.write("-" * 90 + "\n")
+
+
+        # ---- Write folds (Model/Frequency appear only once like screenshot) ----
+        mid_row = (len(fold_results) // 2) + 1
+
+        for i, r in enumerate(fold_results, 1):
+            model_cell = model_str if i == mid_row else ""
+            freq_cell = freq_str if i == mid_row else ""
+
+            f.write(
+                f"{model_cell:<10}"
+                f"{freq_cell:<10}"
+                f"{('Fold ' + str(i)):<10}"
+                f"{r['accuracy']:<10.4f}"
+                f"{r['f1']:<10.4f}"
+                f"{r['precision']:<10.4f}"
+                f"{r['specificity']:<10.4f}"
+                f"{r['mcc']:<10.4f}"
+                f"{r['time_min']:<10.2f}\n"
+            )
+
+
+        # ---- Avg row (Frequency blank like screenshot; Avg bolding is for LaTeX, here plain) ----
+        f.write(
+            f"{'':<10}{'':<10}{'Avg':<10}"
+            f"{acc_avg:<10.4f}"
+            f"{f1_avg:<10.4f}"
+            f"{prec_avg:<10.4f}"
+            f"{spec_avg:<10.4f}"
+            f"{mcc_avg:<10.4f}"
+            f"{time_avg:<10.2f}\n"
+        )
+        f.write("-" * 90 + "\n")
+
+
+
+    print(f"\nValidation table updated: {table_path}")
+
+
+
 
     # ================= FINAL TEST =================
     test_dir = data_dir / "test"
@@ -444,6 +559,10 @@ def main():
     recall_u = tp_u / (tp_u + fn_u + 1e-12)
     specificity_u = tn_u / (tn_u + fp_u + 1e-12)
     precision_u = tp_u / (tp_u + fp_u + 1e-12)
+    mcc_num_u = (tp_u * tn_u) - (fp_u * fn_u)
+    mcc_den_u = ((tp_u+fp_u)*(tp_u+fn_u)*(tn_u+fp_u)*(tn_u+fn_u)) ** 0.5 + 1e-12
+    mcc_u = mcc_num_u / mcc_den_u
+
 
     # ---- Balanced test eval ----
     if device == "cuda":
@@ -459,6 +578,79 @@ def main():
     recall_b = tp_b / (tp_b + fn_b + 1e-12)
     specificity_b = tn_b / (tn_b + fp_b + 1e-12)
     precision_b = tp_b / (tp_b + fp_b + 1e-12)
+    mcc_num_b = (tp_b * tn_b) - (fp_b * fn_b)
+    mcc_den_b = ((tp_b+fp_b)*(tp_b+fn_b)*(tn_b+fp_b)*(tn_b+fn_b)) ** 0.5 + 1e-12
+    mcc_b = mcc_num_b / mcc_den_b
+
+
+    # ================= SAVE/APPEND MASTER TEST TABLE =================
+    test_table_path = (
+        Path("checkpoints")
+        / dataset_name
+        / "test_table.txt"   # one master test table per dataset
+    )
+
+    write_header = not test_table_path.exists()
+
+    freq_str = f"{fs} Hz"
+    model_str = args.model
+
+    # throughput (samples/sec)
+    thpt_u = len(test_ds) / (elapsed_u + 1e-12)
+    thpt_b = len(test_balanced_ds) / (elapsed_b + 1e-12)
+
+    with open(test_table_path, "a") as f:
+        if write_header:
+            f.write("FINAL TEST PERFORMANCE (Ensemble of folds)\n")
+            f.write("=" * 110 + "\n\n")
+            f.write(
+                f"{'Model':<10}"
+                f"{'Freq':<10}"
+                f"{'Test':<10}"
+                f"{'Acc':<10}"
+                f"{'F1':<10}"
+                f"{'Prec':<10}"
+                f"{'Spec':<10}"
+                f"{'MCC':<10}"
+                f"{'Time(s)':<10}"
+                f"{'Thpt':<10}\n"
+            )
+            f.write("-" * 110 + "\n")
+
+        # Unbalanced row (print Model/Freq here)
+        f.write(
+            f"{model_str:<10}"
+            f"{freq_str:<10}"
+            f"{'Unbal':<10}"
+            f"{acc_u:<10.4f}"
+            f"{f1_u:<10.4f}"
+            f"{precision_u:<10.4f}"
+            f"{specificity_u:<10.4f}"
+            f"{mcc_u:<10.4f}"
+            f"{elapsed_u:<10.2f}"
+            f"{thpt_u:<10.2f}\n"
+        )
+
+        # Balanced row (blank Model/Freq like your validation table)
+        f.write(
+            f"{'':<10}"
+            f"{'':<10}"
+            f"{'Bal':<10}"
+            f"{acc_b:<10.4f}"
+            f"{f1_b:<10.4f}"
+            f"{precision_b:<10.4f}"
+            f"{specificity_b:<10.4f}"
+            f"{mcc_b:<10.4f}"
+            f"{elapsed_b:<10.2f}"
+            f"{thpt_b:<10.2f}\n"
+        )
+
+        f.write("-" * 110 + "\n")
+
+    print(f"\nMaster test table updated: {test_table_path}")
+
+
+
 
     # ================= SAVE FINAL TEST RESULTS =================
     results_dir = (
@@ -487,7 +679,9 @@ def main():
         f.write(f"F1-score            : {f1_u:.4f}\n")
         f.write(f"Recall (Sensitivity): {recall_u:.4f}\n")
         f.write(f"Specificity         : {specificity_u:.4f}\n")
-        f.write(f"Precision           : {precision_u:.4f}\n\n")
+        f.write(f"Precision           : {precision_u:.4f}\n")
+        f.write(f"MCC                : {mcc_u:.4f}\n")
+
 
         f.write("PERFORMANCE\n")
         f.write(f"Training time (total) : {training_total_min:.2f} minutes\n")
@@ -506,7 +700,9 @@ def main():
         f.write(f"F1-score            : {f1_b:.4f}\n")
         f.write(f"Recall (Sensitivity): {recall_b:.4f}\n")
         f.write(f"Specificity         : {specificity_b:.4f}\n")
-        f.write(f"Precision           : {precision_b:.4f}\n\n")
+        f.write(f"Precision           : {precision_b:.4f}\n")
+        f.write(f"MCC                : {mcc_b:.4f}\n")
+
 
         f.write("PERFORMANCE\n")
         f.write(f"Inference time      : {elapsed_b:.2f} seconds\n")
@@ -554,14 +750,15 @@ def main():
     print("Confusion Matrix (Test)")
     print(f"[[{tn_u:4d} {fp_u:3d}]")
     print(f" [{fn_u:4d} {tp_u:3d}]]\n")
-    print("F1        Accuracy   Recall(Sens)  Specificity  Precision")
-    print("-" * 58)
+    print("F1        Accuracy   Recall(Sens)  Specificity  Precision MCC")
+    print("-" * 70)
     print(
         f"{f1_u:<9.4f}"
         f"{acc_u:<11.4f}"
         f"{recall_u:<15.4f}"
         f"{specificity_u:<13.4f}"
-        f"{precision_u:<10.4f}"
+        f"{precision_u:<11.4f}"
+        f"{mcc_u:<.4f}"
     )
     print(f"\nInference time : {elapsed_u:.2f} seconds")
     print(f"Throughput     : {len(test_ds)/elapsed_u:.2f} samples/sec")
@@ -571,14 +768,15 @@ def main():
     print("Confusion Matrix (Test)")
     print(f"[[{tn_b:4d} {fp_b:3d}]")
     print(f" [{fn_b:4d} {tp_b:3d}]]\n")
-    print("F1        Accuracy   Recall(Sens)  Specificity  Precision")
-    print("-" * 58)
+    print("F1        Accuracy   Recall(Sens)  Specificity  Precision MCC")
+    print("-" * 70)
     print(
         f"{f1_b:<9.4f}"
         f"{acc_b:<11.4f}"
         f"{recall_b:<15.4f}"
         f"{specificity_b:<13.4f}"
-        f"{precision_b:<10.4f}"
+        f"{precision_b:<11.4f}"
+        f"{mcc_b:<.4f}"
     )
     print(f"\nInference time : {elapsed_b:.2f} seconds")
     print(f"Throughput     : {len(test_balanced_ds)/elapsed_b:.2f} samples/sec")

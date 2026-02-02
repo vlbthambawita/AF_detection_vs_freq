@@ -13,11 +13,11 @@ F1-score            : 0.9546
 Recall (Sensitivity): 0.9759
 Specificity         : 0.9894
 Precision           : 0.9342
-
+MCC                : 0.9478
 PERFORMANCE
-Training time (total) : 56.51 minutes
-Inference time      : 24.21 seconds
-Throughput          : 90.26 samples/sec
+Training time (total) : 68.18 minutes
+Inference time      : 29.56 seconds
+Throughput          : 73.93 samples/sec
 
 
 BALANCED TEST (DOWNSAMPLED MAJORITY)
@@ -32,10 +32,10 @@ F1-score            : 0.9844
 Recall (Sensitivity): 0.9759
 Specificity         : 0.9931
 Precision           : 0.9930
-
+MCC                : 0.9692
 PERFORMANCE
-Inference time      : 6.15 seconds
-Throughput          : 94.70 samples/sec
+Inference time      : 8.06 seconds
+Throughput          : 72.25 samples/sec
 
 
 RUN INFORMATION

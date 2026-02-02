@@ -1,0 +1,85 @@
+---
+config:
+  layout: dagre
+---
+flowchart TB
+
+    T0["<b>End-to-End Patient-Safe Deep Learning Pipeline for AF Detection on PTB-XL</b>"]:::mainTitle
+    
+    subgraph P1 [" "]
+        direction LR
+        H1["DATA ENGINEERING & PREPROCESSING"]:::header --> A1
+        A1(["Raw PTB‑XL ECG + metadata"])
+        A2["Label filter: AFIB vs NORMAL<br>Assign patient_id (leakage‑safe)"]
+        A3["Clean + QC (NaN/Inf, clip, flatline)"]
+        A4["Resample + Z‑score (per lead)"]
+        A5["Segment into 10s windows"]
+        A6["Patient‑safe fold assignment (K‑fold)"]
+        Aout1["samples_{fs}hz.csv"]
+        Aout2["data.pt (folds)"]
+        Aout3["test/test.pt (hold‑out)"]
+    end
+
+    subgraph P2 [" "]
+        direction LR
+        H2["DATA LOADING (PATIENT‑SAFE K‑FOLD)"]:::header --> B1
+        B1["Read data.pt + CSV"]
+        B2{"Select val_fold (1..K)"}
+        B3["Train indices"]
+        B4["Val indices"]
+        B5["Build DataLoaders"]
+    end
+
+    subgraph P3 [" "]
+        direction LR
+        H3["TRAINING (PER FOLD)"]:::header --> C0
+        C0{"Model choice"}
+        C1["CNN1D"]
+        C2["CNN + LSTM"]
+        C3["Training loop (CE)"]
+        C4{"Early stop on Val F1"}
+        C5["Save best.pt"]
+    end
+
+    subgraph P4 [" "]
+        direction LR
+        H4["ENSEMBLE & EVALUATION"]:::header --> D1
+        D1["Load best.pt (5 folds)"]
+        D2["Average logits"]
+        D3["Test eval (unbalanced)"]
+        D4["Balanced test eval"]
+        D5["F1 • Sens • Spec • MCC"]
+    end
+
+    %% CONNECTIONS
+    T0 ~~~ P1
+    A1 --> A2 --> A3 --> A4 --> A5 --> A6
+    A6 --> Aout1 & Aout2 & Aout3
+    B1 --> B2
+    B2 --> B3 & B4
+    B3 --> B5
+    B4 --> B5
+    C0 --> C1 & C2
+    C1 --> C3
+    C2 --> C3
+    C3 --> C4
+    C4 --> C5
+    D1 --> D2 --> D3 --> D4 --> D5
+    P1 --> P2
+    P2 --> P3
+    P3 --> P4
+
+    %% STYLING
+    classDef box fill:#ffffff,stroke:#222,stroke-width:2px,font-size:26px
+    classDef decision fill:#ffffff,stroke:#222,stroke-width:3px,stroke-dasharray:6 4,font-size:26px
+    classDef header fill:none,stroke:none,font-size:38px,font-weight:bold,color:#000
+    classDef title fill:none,stroke:none,font-size:48px,font-weight:bold,color:#000
+    classDef mainTitle fill:none,stroke:none,font-size:50px,font-weight:bold,color:#000,white-space:nowrap;
+    class A1,A2,A3,A4,A5,A6,Aout1,Aout2,Aout3,B1,B3,B4,B5,C1,C2,C3,C5,D1,D2,D3,D4,D5 box
+    class B2,C0,C4 decision
+    class H1,H2,H3,H4 header
+    class T0 title
+    style P1 fill:#FFF3CD,stroke:#333,stroke-width:2px
+    style P2 fill:#D1ECF1,stroke:#333,stroke-width:2px
+    style P3 fill:#D4EDDA,stroke:#333,stroke-width:2px
+    style P4 fill:#F8D7DA,stroke:#333,stroke-width:2px

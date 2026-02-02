@@ -15,6 +15,11 @@ DERIVED METRICS
 Recall (Sensitivity): 0.9873
 Specificity        : 0.9873
 Precision          : 0.9873
+MCC                : 0.9746
+
+RUNTIME
+Fold training time (sec): 170.49
+Fold training time (min): 2.84
 
 RUN INFO
 ------------------------------------------------------------
