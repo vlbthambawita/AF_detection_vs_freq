@@ -166,7 +166,7 @@ def main():
     ap.add_argument("--name", required=True)
 
     # Optional preprocessing parameters
-    ap.add_argument("--fs", type=int, nargs="+", default=[500, 250, 100])
+    ap.add_argument("--fs", type=float, nargs="+", default=[500, 250, 100, 62.5])
     ap.add_argument("--out_root", type=str, default="prepared_data")
     ap.add_argument("--max_samples", type=int, default=None)
     ap.add_argument("--split_ratio", type=float, nargs=3, default=[0.7, 0.2, 0.1])
