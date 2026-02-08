@@ -238,7 +238,7 @@ def train_one_fold(model, optimizer, train_loader, val_loader, device, out_dir):
         else:
             bad_epochs += 1
         if best_roc is not None:
-            np.savez(out_dir / "roc_val.npz", y_true=best_roc[0], y_score=best_roc[1],)
+            np.savez(out_dir / "roc_val.npz", y_true=best_roc["y_true"], y_score=best_roc["y_score"],)
         if bad_epochs >= EARLY_STOPPING_PATIENCE:
             print("Early stopping triggered")
             break
