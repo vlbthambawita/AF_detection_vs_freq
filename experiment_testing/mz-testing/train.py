@@ -55,7 +55,7 @@ def compute_f1(tp, fp, fn):
 
 
 # ---------- Evaluation (VAL / TEST) ----------
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, return_scores=False):
     model.eval()
     loss_fn = nn.CrossEntropyLoss()
 
@@ -63,17 +63,22 @@ def evaluate(model, loader, device):
     tp = tn = fp = fn = 0
 
     with torch.no_grad():
+        all_probs = []
+        all_labels = []
         for x, y in loader:
             x = x.to(device).float()
             y = y.to(device).long()
 
             logits = model(x)
             loss = loss_fn(logits, y)
+            probs = torch.softmax(logits, dim=1)[:, 1]  # probability of class 1 AFIB
             preds = logits.argmax(dim=1)
 
             total_loss += loss.item() * y.size(0)
             total += y.size(0)
             correct += (preds == y).sum().item()
+            all_probs.append(probs.cpu())
+            all_labels.append(y.cpu())
 
             tp += ((preds == 1) & (y == 1)).sum().item()
             tn += ((preds == 0) & (y == 0)).sum().item()
@@ -83,8 +88,11 @@ def evaluate(model, loader, device):
     acc = correct / total
     f1 = compute_f1(tp, fp, fn)
     cm = [[tn, fp], [fn, tp]]
-
-    return acc, f1, cm, total_loss / total
+    
+    if return_scores:
+        return acc, f1, cm, total_loss / total, torch.cat(all_probs).cpu().numpy(), torch.cat(all_labels).cpu().numpy()
+    else:
+        return acc, f1, cm, total_loss / total
 
 
 # ---------- Ensemble Evaluation (TEST) ----------
@@ -168,6 +176,7 @@ def train_one_fold(model, optimizer, train_loader, val_loader, device, out_dir):
     best_acc = None
     best_cm = None
     bad_epochs = 0
+    best_roc = None
 
     best_epoch = None
     best_val_loss = None
@@ -199,7 +208,7 @@ def train_one_fold(model, optimizer, train_loader, val_loader, device, out_dir):
         train_loss /= total
 
         # ---- Validation ----
-        acc, f1, cm, val_loss = evaluate(model, val_loader, device)
+        acc, f1, cm, val_loss, y_score, y_true = evaluate(model, val_loader, device, return_scores=True)
         epoch_time = time.time() - epoch_start
 
         scheduler.step(val_loss)
@@ -222,11 +231,14 @@ def train_one_fold(model, optimizer, train_loader, val_loader, device, out_dir):
             best_cm = cm
             best_epoch = epoch
             best_val_loss = val_loss
+            best_roc = {"y_true": y_true, "y_score": y_score}
             bad_epochs = 0
+            
             torch.save(model.state_dict(), out_dir / "best.pt")
         else:
             bad_epochs += 1
-
+        if best_roc is not None:
+            np.savez(out_dir / "roc_val.npz", y_true=best_roc[0], y_score=best_roc[1],)
         if bad_epochs >= EARLY_STOPPING_PATIENCE:
             print("Early stopping triggered")
             break
