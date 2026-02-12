@@ -210,3 +210,4 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 /prepared_data
+experiment_testing/mz-testing/checkpoints/ptbl-xl/100hz/.DS_Store
