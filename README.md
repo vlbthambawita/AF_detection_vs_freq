@@ -29,7 +29,8 @@ Pipeline for detecting **Atrial Fibrillation (AFIB)** from **PTB-XL ECG** record
    - Optional **final hold-out test** evaluation using an **ensemble of all folds** (average logits)
 
 ---
-![ECG preprocessing pipeline](ecg_preprocessing_pipeline.png)
+![ECG preprocessing pipeline](src/ecg_preprocessing_pipeline.png)
+
 
 
 ## Important note on prevalence (class balance)
