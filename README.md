@@ -40,11 +40,6 @@ That means:
 
 - Training/evaluation results reflect performance on a **balanced** distribution
 - Real clinical prevalence may differ, so metrics like accuracy can change under real-world distributions
-
-If you use balanced data, state in the report:
-
-> “All training folds were class-balanced at the segment level (AFIB=NORMAL), therefore evaluation reflects balanced prevalence.”
-
 ---`
 
 2. Download the PTB-XL dataset:
