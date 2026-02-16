@@ -70,6 +70,7 @@ The main.py script will guide you through:
 ## Project Structure
 
 ```
+
 SEARCH_AF_detection_OsloMet_BachelorGroup/
 ├── src/
 │   ├── main.py                    # Interactive pipeline runner
@@ -89,6 +90,7 @@ SEARCH_AF_detection_OsloMet_BachelorGroup/
 │           └── 500hz/             # Models trained at 500 Hz
 ├── requirements.txt
 └── README.md
+
 ```
 
 ## Data Preparation
