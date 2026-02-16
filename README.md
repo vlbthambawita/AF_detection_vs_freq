@@ -1,6 +1,6 @@
 # SEARCH_AF_detection_OsloMet_BachelorGroup
 
-Pipeline for detecting **Atrial Fibrillation (AFIB)** from **PTB-XL ECG** recordings using deep learning (**CNN1D** and **CNN–LSTM**) with **patient-safe splitting**, **K-fold cross-validation**, and **optional hold-out test** evaluation.
+Pipeline for detecting **Atrial Fibrillation (AFIB)** from **PTB-XL ECG** recordings using deep learning (**CNN1D** and **CNN–LSTM**) with **patient-safe splitting**, **K-fold cross-validation**, and optional **hold-out test** evaluation.
 
 ---
 
@@ -8,51 +8,57 @@ Pipeline for detecting **Atrial Fibrillation (AFIB)** from **PTB-XL ECG** record
 
 1. **Load PTB-XL**
    - Reads ECG signals and metadata
-   - Keeps only **AFIB vs NORMAL** subset
+   - Keeps only the **AFIB vs NORMAL** subset
 
 2. **Preprocess ECG (universal pipeline)**
-   - Cleaning (NaN/Inf fix)
+   - Cleaning (NaN/Inf handling)
    - Resampling to target sampling rates (62/100/250/500 Hz)
    - Z-score normalization per lead
-   - Segmenting into **fixed 10s segments**
-   - Optional signal QC: clipping extremes + zeroing flatline leads
+   - Segmenting into fixed **10 s segments**
+   - Optional signal QC: clipping extremes and zeroing flatline leads
 
 3. **Leakage safety (patient-safe splitting)**
    - **Patients are the unit of splitting**
    - No patient appears in multiple folds or splits
    - Segments inherit the fold/split of the parent record/patient
-   - If `--folds 10` and PTB-XL official `strat_fold` exists, we use PTB-XL official folds
+   - If `--folds 10` and PTB-XL official `strat_fold` exists, the pipeline can use PTB-XL official folds
 
-4. **Training & evaluation**
+4. **Training and evaluation**
    - K-fold training (default: **5-fold**)
    - Saves per-fold checkpoints and ROC data
-   - Optional **final hold-out test** evaluation using an **ensemble of all folds** (average logits)
+   - Optional final hold-out **test** evaluation using an **ensemble** across folds (average logits)
 
 ---
+
 ![ECG preprocessing pipeline](src/ecg_preprocessing_pipeline.png)
 
-
+---
 
 ## Important note on prevalence (class balance)
 
-This project can apply balancing to create an approximately **50/50 AFIB vs NORMAL** dataset (prevalence ≈ 0.5).
-That means:
+This project can apply balancing to create an approximately **50/50 AFIB vs NORMAL** dataset (prevalence ≈ 0.5). That means:
 
 - Training/evaluation results reflect performance on a **balanced** distribution
 - Real clinical prevalence may differ, so metrics like accuracy can change under real-world distributions
----`
 
-2. Download the PTB-XL dataset:
-   - Visit https://physionet.org/content/ptb-xl/1.0.3/
-   - Extract the dataset to your preferred location (default: `/ro/data`)
+---
 
-## Quick Start
+## Dataset download
+
+Download the PTB-XL dataset:
+- PTB-XL on PhysioNet: https://physionet.org/content/ptb-xl/1.0.3/
+- Extract the dataset to your preferred location
+
+---
+
+## Quick start
 
 Run the interactive pipeline:
+
 ```bash
 cd src
 python main.py
-```
+
 
 The main.py script will guide you through:
 1. **PTB-XL Data Location** - Specify where your PTB-XL data is stored
