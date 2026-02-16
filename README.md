@@ -66,7 +66,7 @@ The main.py script will guide you through:
 3. **Sampling Rate Selection** - Select one or more: 62 Hz, 100 Hz, 250 Hz, 500 Hz
 4. **Model Selection** - Choose CNN1D or CNN-LSTM
 5. **Training** - Run training with hardware requirements warning
-
+```
 ## Project Structure
 
 ```
