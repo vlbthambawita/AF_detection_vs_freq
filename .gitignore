@@ -73,9 +73,9 @@ prepared_data/
 src/prepared_data/
 
 # Torch model weights
-*.pt
-*.pth
-*.ckpt
+#*.pt
+#*.pth
+#*.ckpt
 
 # Numpy training artifacts
 #*.npz
