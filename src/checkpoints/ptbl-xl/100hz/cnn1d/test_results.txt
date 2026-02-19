@@ -1,0 +1,60 @@
+FINAL TEST RESULTS (Ensemble of all folds' best.pt)
+============================================================
+
+UNBALANCED TEST
+------------------------------------------------------------
+CONFUSION MATRIX (TEST)
+[[2797  38]
+ [8   432]]
+
+METRICS
+Accuracy            : 0.9860
+F1-score            : 0.9495
+Recall (Sensitivity): 0.9818
+Specificity         : 0.9866
+Precision           : 0.9191
+MCC                : 0.9420
+PERFORMANCE
+Training time (total) : 9.34 minutes
+Inference time      : 10.26 seconds
+Throughput          : 319.21 samples/sec
+
+
+BALANCED TEST (DOWNSAMPLED MAJORITY)
+------------------------------------------------------------
+CONFUSION MATRIX (TEST)
+[[433  7]
+ [8   432]]
+
+METRICS
+Accuracy            : 0.9830
+F1-score            : 0.9829
+Recall (Sensitivity): 0.9818
+Specificity         : 0.9841
+Precision           : 0.9841
+MCC                : 0.9659
+PERFORMANCE
+Inference time      : 2.71 seconds
+Throughput          : 324.26 samples/sec
+
+
+RUN INFORMATION
+============================================================
+Dataset            : ptbl-xl
+Sampling rate      : 100 Hz
+Model              : cnn1d
+Folds ensembled    : 5
+Device             : cpu
+
+DATASET SIZES
+------------------------------------------------------------
+Test samples (unbalanced) : 3275
+Test samples (balanced)   : 880
+
+TRAINING SETTINGS
+------------------------------------------------------------
+Epochs (max)       : 50
+Batch size         : 32
+Learning rate      : 0.001
+K-Folds            : 5
+Early stop patience: 10
