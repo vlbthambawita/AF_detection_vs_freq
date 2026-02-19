@@ -6,14 +6,13 @@ This script provides an interactive interface for:
 2. Preprocessing ECG data
 3. Training models at different sampling rates
 """
-
 import os
 import sys
 import subprocess
 import logging
 from pathlib import Path
 
-# ================= Logger =================
+# ================= Logger file=================
 
 logging.basicConfig(
     level=logging.INFO,

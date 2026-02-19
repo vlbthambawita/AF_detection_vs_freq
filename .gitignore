@@ -65,8 +65,8 @@ dist/
 ############################################################
 
 # All training outputs
-src/checkpoints/
-checkpoints/
+#src/checkpoints/
+#checkpoints/
 
 # Prepared datasets (VERY LARGE)
 prepared_data/
