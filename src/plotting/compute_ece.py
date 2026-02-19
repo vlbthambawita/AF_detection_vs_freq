@@ -33,7 +33,23 @@ def compute_ece(y_true, y_prob, n_bins=15):
             ece += np.abs(acc - conf) * np.sum(mask) / N
 
     return ece
+# ---------- unified ECE ----------
+def compute_ece_posclass(y_true, y_prob, n_bins=15):
 
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    binids = np.clip(np.digitize(y_prob, bins) - 1, 0, n_bins - 1)
+
+    ece = 0.0
+    N = len(y_true)
+
+    for b in range(n_bins):
+        m = binids == b
+        if np.any(m):
+            acc = y_true[m].mean()
+            conf = y_prob[m].mean()
+            ece += (m.sum() / N) * abs(acc - conf)
+
+    return float(ece)
 
 # ================= LOAD NPZ =================
 def load_fold_npz(base: Path, fold: int):
@@ -49,6 +65,15 @@ def load_fold_npz(base: Path, fold: int):
     y_score = np.clip(y_score, EPS, 1 - EPS)
 
     return y_true, y_score
+#using for calculating ECE from the ensembled probabilities (after averaging over folds)
+def load_fold_probs(base, fold):
+    p = base / f"fold_{fold}" / "roc_val.npz"
+
+    data = np.load(p)
+    y_true = data["y_true"].astype(int)
+    y_prob = data["y_score"].astype(float)
+
+    return y_true, y_prob
 
 
 # ================= MAIN =================
@@ -62,11 +87,14 @@ for freq in FREQS:
         eces = []
 
         for fold in range(1, FOLDS + 1):
-            y, s = load_fold_npz(base, fold)
-            ece = compute_ece(y, s, N_BINS)
+            y, s = load_fold_probs(base, fold)
+            ece = compute_ece_posclass(y, s)
             eces.append(ece)
 
-            print(f"{freq} | {model} | fold {fold} → ECE = {ece:.5f}")
+        print(
+            f"{freq:<6} | {model:<9} "
+            f"ECE = {np.mean(eces):.4f} ± {np.std(eces):.4f}"
+        )
 
         mean_ece = float(np.mean(eces))
         std_ece = float(np.std(eces))
