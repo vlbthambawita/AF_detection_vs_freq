@@ -368,6 +368,8 @@ def compute_ece_posclass(y_true, y_prob_pos, n_bins=10):
 
     ece = 0.0
     N = len(y_true)
+    print("Example probs:", y_prob_pos[:10])
+
     for b in range(n_bins):
         m = binids == b
         if np.any(m):

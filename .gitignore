@@ -82,8 +82,8 @@ src/prepared_data/
 #*.npy
 
 # Auto-generated evaluation tables
-*validation_table.txt
-*test_table.txt
+!validation_table.txt
+!test_table.txt
 
 # Generated confusion matrices / csv outputs
 confusion_matrix_*.csv
@@ -95,7 +95,7 @@ summary_*.csv
 *.svg
 
 ############################################################
-# OPTIONAL — keep pipeline figures if you want
+# OPTIONAL — keeping pipeline figures
 ############################################################
 !src/ecg_preprocessing_pipeline.png
 !src/ecg_preprocessing_pipeline.mmd
