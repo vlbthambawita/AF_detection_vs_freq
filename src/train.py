@@ -362,21 +362,21 @@ def train_one_fold(model, optimizer, train_loader, val_loader, device, out_dir):
         "time_min": float(fold_time / 60.0),
     }
 #---Extra function to compute Expected Calibration Error (ECE) for the ensemble predictions on the test set. Not used in validation since we do not compute ECE for validation.
-def compute_ece(y_true, y_prob, n_bins=10):
-    bins = np.linspace(0, 1, n_bins + 1)
-    binids = np.digitize(y_prob, bins) - 1
+def compute_ece_posclass(y_true, y_prob_pos, n_bins=10):
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    binids = np.clip(np.digitize(y_prob_pos, bins) - 1, 0, n_bins - 1)
 
     ece = 0.0
     N = len(y_true)
-
-    for i in range(n_bins):
-        mask = binids == i
-        if np.any(mask):
-            acc = np.mean(y_true[mask] == (y_prob[mask] >= 0.5))
-            conf = np.mean(y_prob[mask])
-            ece += np.sum(mask) / N * abs(acc - conf)
-
+    for b in range(n_bins):
+        m = binids == b
+        if np.any(m):
+            frac_pos = y_true[m].mean()      # empirical P(y=1 | bin)
+            conf_b = y_prob_pos[m].mean()    # mean predicted P(y=1)
+            ece += (m.sum() / N) * abs(frac_pos - conf_b)
     return ece
+
+
 
 #------------------ Test-only evaluation (after all folds trained) ----------
 #----------Evaluates the ensemble of all folds' best models on the test set, computes metrics, saves results, and updates master test table. Called when --test_only flag is used to skip training and directly evaluate on test set using existing checkpoints.
@@ -434,10 +434,13 @@ def run_test_only(data_path, model_name):
 
     # ---- Metrics ----
     auroc = roc_auc_score(y_true, y_prob)
-    ece = compute_ece(y_true, y_prob)
+    ece = compute_ece_posclass(y_true, y_prob)
 
     print(f"\nAUROC : {auroc:.4f}")
     print(f"ECE   : {ece:.4f}")
+    print(y_prob.min(), y_prob.max(), y_prob.mean())
+    print("pos rate:", y_true.mean())
+
 
     # ---- Save for ROC plotting ----
     out = Path("checkpoints") / dataset_name / f"{fs}hz" / model_name
