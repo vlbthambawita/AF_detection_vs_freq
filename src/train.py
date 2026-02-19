@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, Subset
 from loader import load_kfold, ECGDataset
 from models.cnn1d import CNN1D
 from models.cnn_lstm import CNN_LSTM_ECG
+from sklearn.metrics import roc_auc_score
 
 
 
@@ -96,6 +97,7 @@ def evaluate(model, loader, device, return_scores=False):
 
 
 # ---------- Ensemble Evaluation (TEST) ----------
+#------------------ Averages predictions from multiple models (e.g., folds) by averaging their logits before softmax, then computes metrics on the ensemble output. Used for final test evaluation where we ensemble all folds' best models. Not used for validation since we do not ensemble during validation.
 def evaluate_ensemble(models, loader, device):
     for m in models:
         m.eval()
@@ -134,7 +136,37 @@ def evaluate_ensemble(models, loader, device):
     cm = [[tn, fp], [fn, tp]]
 
     return acc, f1, cm, total_loss / total
+#Eceptional function created to return probabilities for ROC curve plotting in test phase (not used in validation since we do not plot ROC for validation)
+#------------------ Ensemble Evaluation with probabilities (for ROC) ----------
+def evaluate_ensemble_with_probs(models, loader, device):
+    for m in models:
+        m.eval()
 
+    all_probs = []
+    all_labels = []
+
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device).float()
+            y = y.to(device).long()
+
+            logits_sum = None
+            for m in models:
+                logits = m(x)
+                logits_sum = logits if logits_sum is None else logits_sum + logits
+
+            logits_avg = logits_sum / len(models)
+
+            probs = torch.softmax(logits_avg, dim=1)[:, 1]
+
+            all_probs.append(probs.cpu())
+            all_labels.append(y.cpu())
+
+    y_prob = torch.cat(all_probs).numpy()
+    y_true = torch.cat(all_labels).numpy()
+
+    return y_true, y_prob
+#------------------ Balanced subset creation (for test evaluation) ----------
 
 def make_balanced_subset_binary(dataset, seed=42):
     """
@@ -329,18 +361,106 @@ def train_one_fold(model, optimizer, train_loader, val_loader, device, out_dir):
 
         "time_min": float(fold_time / 60.0),
     }
+#---Extra function to compute Expected Calibration Error (ECE) for the ensemble predictions on the test set. Not used in validation since we do not compute ECE for validation.
+def compute_ece(y_true, y_prob, n_bins=10):
+    bins = np.linspace(0, 1, n_bins + 1)
+    binids = np.digitize(y_prob, bins) - 1
 
+    ece = 0.0
+    N = len(y_true)
+
+    for i in range(n_bins):
+        mask = binids == i
+        if np.any(mask):
+            acc = np.mean(y_true[mask] == (y_prob[mask] >= 0.5))
+            conf = np.mean(y_prob[mask])
+            ece += np.sum(mask) / N * abs(acc - conf)
+
+    return ece
+
+#------------------ Test-only evaluation (after all folds trained) ----------
+#----------Evaluates the ensemble of all folds' best models on the test set, computes metrics, saves results, and updates master test table. Called when --test_only flag is used to skip training and directly evaluate on test set using existing checkpoints.
+def run_test_only(data_path, model_name):
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    data_dir = Path(data_path)
+    fs = int(data_dir.name.replace("hz", ""))
+    dataset_name = data_dir.parent.name
+
+    print("\nTEST ONLY MODE")
+    print("="*60)
+
+    # ---- Load test data ----
+    test_data = torch.load(data_dir / "test" / "test.pt", map_location="cpu")
+
+    test_ds = ECGDataset.__new__(ECGDataset)
+    test_ds.X = test_data["X"]
+    test_ds.y = test_data["y"]
+
+    test_loader = DataLoader(test_ds, BATCH_SIZE, shuffle=False)
+
+    in_ch = test_ds.X[0].shape[0]
+    num_classes = int(torch.max(test_ds.y).item() + 1)
+
+    # ---- Load ensemble models ----
+    models = []
+
+    for fold in range(1, KFOLDS + 1):
+
+        if model_name == "cnn1d":
+            m = CNN1D(in_ch, num_classes)
+        else:
+            m = CNN_LSTM_ECG(in_channels=in_ch, num_classes=num_classes)
+
+        ckpt = (
+            Path("checkpoints")
+            / dataset_name
+            / f"{fs}hz"
+            / model_name
+            / f"fold_{fold}"
+            / "best.pt"
+        )
+        if not ckpt.exists():
+            raise FileNotFoundError(f"Missing checkpoint: {ckpt}")
+
+
+        m.load_state_dict(torch.load(ckpt, map_location=device))
+        m.to(device)
+        models.append(m)
+
+    # ---- Ensemble inference ----
+    y_true, y_prob = evaluate_ensemble_with_probs(models, test_loader, device)
+
+    # ---- Metrics ----
+    auroc = roc_auc_score(y_true, y_prob)
+    ece = compute_ece(y_true, y_prob)
+
+    print(f"\nAUROC : {auroc:.4f}")
+    print(f"ECE   : {ece:.4f}")
+
+    # ---- Save for ROC plotting ----
+    out = Path("checkpoints") / dataset_name / f"{fs}hz" / model_name
+    np.savez(out / "roc_test.npz", y_true=y_true, y_score=y_prob)
+
+    print("Saved:", out / "roc_test.npz")
 
 
 # ============================ MAIN ============================
 def main():
     parser = argparse.ArgumentParser()
+    #--------- Required arguments ----------
     parser.add_argument("--data_path", required=True)
-    parser.add_argument(
-    "--model",
+    #--------- Model choice either cnn1d or cnn_lstm----------
+    parser.add_argument("--model",
     choices=["cnn1d", "cnn_lstm"],
-    default="cnn1d"
-)
+    required=True)
+    #---------Only testing (skip training) flag ----------
+    parser.add_argument(
+    "--test_only",
+    action="store_true",
+    help="Skip training and run ensemble test evaluation only")
+
 
     args = parser.parse_args()
 
@@ -359,12 +479,18 @@ def main():
     print(f"Sampling rate : {fs} Hz")
     print(f"Model         : {args.model}")
     print("=" * 70)
-
+    if args.test_only:
+        run_test_only(args.data_path, args.model)
+        return
+    
+    
     best_fold = None
     best_f1_overall = -1
 
     training_start = time.time()
     fold_results = []
+    
+
 
 
     # ---------- K-FOLD LOOP ----------
