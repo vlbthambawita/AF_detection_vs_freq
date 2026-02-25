@@ -109,3 +109,4 @@ summary_*.csv
 # MAC GLOBAL IGNORE SAFETY
 ############################################################
 **/.DS_Store
+/data
