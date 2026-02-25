@@ -11,6 +11,25 @@ import sys
 import subprocess
 import logging
 from pathlib import Path
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+from rich.align import Align
+from rich.rule import Rule
+from pathlib import Path
+import os
+
+console = Console()
+#=================== Rich UI Helper =================
+def section(title, style="bold cyan"):
+    """Reusable section header."""
+    console.print(
+        Panel(
+            Text(title, justify="center", style=style),
+            border_style="cyan",
+            padding=(0, 2),
+        )
+    )
 
 # ================= Logger file=================
 
@@ -39,7 +58,7 @@ def ask_choice(question, choices):
                 return ans
         except ValueError:
             pass
-        print("Invalid input. Please enter a valid number.\n")
+        print("[bold red]Invalid input. Please enter a valid number.[/bold red]\n")
 
 
 def ask_yes_no(question):
@@ -52,7 +71,7 @@ def ask_yes_no(question):
             return True
         elif ans in ['n', 'no']:
             return False
-        print("Invalid input. Please enter 'y' or 'n'.\n")
+        print("[bold red]Invalid input. Please enter 'y' or 'n'.[bold red]\n")
 
 
 def display_hardware_warning():
@@ -60,15 +79,15 @@ def display_hardware_warning():
     Display hardware requirements warning before training.
     """
     print("\n" + "=" * 60)
-    print("⚠️  HARDWARE REQUIREMENT WARNING  ⚠️")
-    print("=" * 60)
+    print("[red]⚠️  HARDWARE REQUIREMENT WARNING  ⚠️[red]")
+    print("[yellow]=" * 60)
     print("\nThis training process is computationally intensive.")
     print("\nFor reasonable performance, you need ONE of the following:")
     print("  • GPU (CUDA-enabled) - RECOMMENDED")
     print("  • At least 12 CPU cores with multithreading enabled")
     print("\nWithout adequate hardware, training will be VERY SLOW.")
     print("Each fold may take significant time on CPU-only systems.")
-    print("=" * 60 + "\n")
+    print("=" * 60 + "\n[/yellow]")
 
     # Ask user to confirm
     while True:
@@ -205,200 +224,209 @@ def run_data_preparation(dataset_path, dataset_name, out_root):
 
 def main():
 
-    print("\n" + "=" * 70)
-    print(" ECG ARRHYTHMIA DETECTION PIPELINE")
-    print(" PTB-XL Dataset Processing & Training")
-    print("=" * 70 + "\n")
+    # ================= HEADER =================
+    console.print(
+        Panel(
+            Align.center(
+                "[bold green]ECG PTB-XL DETECTION PIPELINE[/bold green]\n"
+                "PTB-XL Dataset Processing & Training"
+            ),
+            border_style="green",
+        )
+    )
 
-    # ================= Step 1: PTB-XL Data Location =================
-    
-    print("=" * 70)
-    print(" STEP 1: PTB-XL DATA LOCATION")
-    print("=" * 70)
-    
-    # Ask if data is PTBXL
+    # ================= Step 1 =================
+    section("STEP 1: PTB-XL DATA LOCATION")
+
     is_ptbxl = ask_yes_no("Is the data PTB-XL dataset?")
-    
     if not is_ptbxl:
-        print("\n⚠️  This pipeline is currently configured for PTB-XL only.")
-        print("Exiting...")
+        console.print(
+            "[yellow]⚠ This pipeline is currently configured for PTB-XL only.[/yellow]"
+        )
+        console.print("[red]Exiting...[/red]")
         return
-    
-    # Ask if data is ready on the "ro" directory
+
     default_ro_path = "/ro/data"
-    data_ready = ask_yes_no(f"Is the PTB-XL data ready at '{default_ro_path}'?")
-    
+    data_ready = ask_yes_no(
+        f"Is the PTB-XL data ready at '{default_ro_path}'?"
+    )
+
     if data_ready:
         raw_data_path = default_ro_path
-        print(f"\n✓ Using PTB-XL data from: {raw_data_path}")
+        console.print(f"[green]✓ Using PTB-XL data from:[/green] {raw_data_path}")
     else:
-        raw_data_path = input(f"\nEnter PTB-XL data directory path: ").strip()
+        raw_data_path = input(
+            "\nEnter PTB-XL data directory path: "
+        ).strip()
         if not raw_data_path:
-            print("No path provided. Exiting...")
+            console.print("[red]No path provided. Exiting...[/red]")
             return
-    
-    # Verify the data path exists
+
     if not os.path.exists(raw_data_path):
-        print(f"\n✗ Error: Directory does not exist: {raw_data_path}")
+        console.print(
+            f"[red]✗ Directory does not exist:[/red] {raw_data_path}"
+        )
         return
-    
-    # Check for ptbxl_database.csv
+
     db_path = os.path.join(raw_data_path, "ptbxl_database.csv")
     if not os.path.exists(db_path):
-        print(f"\n✗ Error: ptbxl_database.csv not found in {raw_data_path}")
-        print("Please ensure the PTB-XL dataset is properly downloaded.")
+        console.print(
+            f"[red]✗ ptbxl_database.csv not found in {raw_data_path}[/red]"
+        )
+        console.print(
+            "[yellow]Please ensure the PTB-XL dataset is properly downloaded.[/yellow]"
+        )
         return
-    
-    print(f"✓ Found PTB-XL database at: {db_path}")
 
-    # ================= Step 2: Data Output Location =================
-    
-    print("\n" + "=" * 70)
-    print(" STEP 2: OUTPUT DATA LOCATION")
-    print("=" * 70)
-    
-    # Ask where to read data from (can reuse existing prepared data)
-    print("\nOptions:")
-    print("  1) Use existing prepared data (from previous run)")
-    print("  2) Prepare new data from raw PTB-XL")
-    
+    console.print(f"[green]✓ Found PTB-XL database:[/green] {db_path}")
+
+    # ================= Step 2 =================
+    section("STEP 2: OUTPUT DATA LOCATION")
+
+    console.print("\n[bold]Options:[/bold]")
+    console.print("  [cyan]1)[/cyan] Use existing prepared data")
+    console.print("  [cyan]2)[/cyan] Prepare new data from raw PTB-XL")
+
     data_source_choice = ask_choice(
         "\nWhere should the data be loaded from?",
         [
             "Use existing prepared data",
-            "Prepare new data from raw PTB-XL"
-        ]
+            "Prepare new data from raw PTB-XL",
+        ],
     )
-    
+
     if data_source_choice == 1:
-        # Ask for existing data path
         default_data_path = "prepared_data/ptb-xl"
-        data_path = input(f"\nEnter path to prepared data (default: {default_data_path}): ").strip()
+        data_path = input(
+            f"\nEnter path to prepared data (default: {default_data_path}): "
+        ).strip()
+
         if not data_path:
             data_path = default_data_path
-        
+
         if not os.path.exists(data_path):
-            print(f"\n✗ Error: Prepared data not found at: {data_path}")
-            print("Please prepare the data first (option 2).")
+            console.print(
+                f"[red]✗ Prepared data not found:[/red] {data_path}"
+            )
+            console.print(
+                "[yellow]Prepare the data first (option 2).[/yellow]"
+            )
             return
-        
-        print(f"✓ Using prepared data from: {data_path}")
-        
+
+        console.print(f"[green]✓ Using prepared data:[/green] {data_path}")
+
     else:
-        # Prepare new data
         default_out_root = "prepared_data"
-        out_root = input(f"\nEnter output directory for prepared data (default: {default_out_root}): ").strip()
+        out_root = input(
+            f"\nEnter output directory (default: {default_out_root}): "
+        ).strip()
+
         if not out_root:
             out_root = default_out_root
-        
-        print(f"\n✓ Data will be saved to: {out_root}")
-        
-        # Run data preparation
+
+        console.print(f"[green]✓ Data will be saved to:[/green] {out_root}")
+
         success = run_data_preparation(raw_data_path, "ptb-xl", out_root)
         if not success:
-            print("\n✗ Data preparation failed. Exiting...")
+            console.print("[red]✗ Data preparation failed.[/red]")
             return
-        
+
         data_path = os.path.join(out_root, "ptb-xl")
-        print(f"✓ Prepared data available at: {data_path}")
+        console.print(f"[green]✓ Prepared data available:[/green] {data_path}")
 
-    # ================= Step 3: Sampling Rate Selection =================
-    
-    print("\n" + "=" * 70)
-    print(" STEP 3: SAMPLING RATE SELECTION")
-    print("=" * 70)
-    
+    # ================= Step 3 =================
+    section("STEP 3: SAMPLING RATE SELECTION")
+
     selected_rates = select_sampling_rates()
-    print(f"\n✓ Selected sampling rates: {selected_rates}")
+    console.print(
+        f"[green]✓ Selected sampling rates:[/green] {selected_rates}"
+    )
 
-    # ================= Step 4: Model Selection =================
-    
-    print("\n" + "=" * 70)
-    print(" STEP 4: MODEL SELECTION")
-    print("=" * 70)
-    
+    # ================= Step 4 =================
+    section("STEP 4: MODEL SELECTION")
+
     model_choice = ask_choice(
         "\nWhich model would you like to train?",
         [
             "CNN1D (1D Convolutional Neural Network)",
-            "CNN-LSTM (CNN with LSTM layers)"
-        ]
+            "CNN-LSTM (CNN with LSTM layers)",
+        ],
     )
-    
-    model_type = "cnn1d" if model_choice == 1 else "cnn_lstm"
-    print(f"\n✓ Selected model: {model_type}")
 
-    # ================= Step 5: Hardware Warning =================
-    
-    print("\n" + "=" * 70)
-    print(" STEP 5: TRAINING")
-    print("=" * 70)
-    
-    # Display hardware warning
+    model_type = "cnn1d" if model_choice == 1 else "cnn_lstm"
+    console.print(f"[green]✓ Selected model:[/green] {model_type}")
+
+    # ================= Step 5 =================
+    section("STEP 5: TRAINING")
+
     if not display_hardware_warning():
-        print("\n⚠️  Training cancelled by user.")
+        console.print("[yellow]⚠ Training cancelled by user.[/yellow]")
         return
 
-    # ================= Step 6: Training =================
-    
-    print("\n" + "=" * 70)
-    print(" STARTING TRAINING PROCESS")
-    print("=" * 70)
-    
-    # Convert data_path to Path object
+    # ================= Step 6 =================
+    section("STARTING TRAINING PROCESS", style="bold green")
+
     data_path_obj = Path(data_path)
-    
-    # Run training for each selected sampling rate
     training_results = []
-    
+
     for rate in selected_rates:
         rate_path = data_path_obj / f"{rate}hz"
-        
-        # Check if data exists for this sampling rate
+
         if not rate_path.exists():
-            print(f"\n⚠️  No data found for {rate} Hz at {rate_path}")
-            print(f"   Skipping {rate} Hz...")
+            console.print(
+                f"[yellow]⚠ No data found for {rate} Hz — skipping.[/yellow]"
+            )
             continue
-        
-        # Run training
-        print(f"\n{'='*60}")
-        print(f" TRAINING: {rate} Hz with {model_type}")
-        print(f"{'='*60}")
-        
+
+        console.print(
+            Rule(f"[bold cyan]TRAINING: {rate} Hz with {model_type}")
+        )
+
         run_training(data_path_obj, rate, model_type)
-        
-        # Display checkpoint information
-        checkpoint_dir = Path("checkpoints") / "ptb-xl" / f"{rate}hz" / model_type
+
+        checkpoint_dir = (
+            Path("checkpoints") / "ptb-xl" / f"{rate}hz" / model_type
+        )
+
         if checkpoint_dir.exists():
-            print(f"\n✓ Checkpoint saved at: {checkpoint_dir}")
-            
-            # Count saved checkpoints
+            console.print(
+                f"[green]✓ Checkpoint saved:[/green] {checkpoint_dir}"
+            )
+
             fold_dirs = list(checkpoint_dir.glob("fold_*"))
-            print(f"✓ Folds completed: {len(fold_dirs)}")
-            
+            console.print(
+                f"[green]✓ Folds completed:[/green] {len(fold_dirs)}"
+            )
+
             for fold_dir in sorted(fold_dirs):
                 best_pt = fold_dir / "best.pt"
                 if best_pt.exists():
                     size_mb = best_pt.stat().st_size / (1024 * 1024)
-                    print(f"   - {fold_dir.name}/best.pt ({size_mb:.2f} MB)")
-        
+                    console.print(
+                        f"   • {fold_dir.name}/best.pt "
+                        f"[dim]({size_mb:.2f} MB)[/dim]"
+                    )
+
         training_results.append(rate)
-    
-    # ================= Summary =================
-    
-    print("\n" + "=" * 70)
-    print(" TRAINING COMPLETE")
-    print("=" * 70)
-    
+
+    # ================= SUMMARY =================
+    section("TRAINING COMPLETE", style="bold green")
+
     if training_results:
-        print(f"\n✓ Successfully trained for sampling rates: {training_results}")
-        print(f"\n✓ All checkpoints saved in: checkpoints/ptb-xl/")
+        console.print(
+            f"[green]✓ Successfully trained:[/green] {training_results}"
+        )
+        console.print(
+            "[green]✓ Checkpoints saved in:[/green] checkpoints/ptb-xl/"
+        )
     else:
-        print("\n⚠️  No training completed.")
-    
-    print("\nThank you for using the ECG Arrhythmia Detection Pipeline!")
+        console.print("[yellow]⚠ No training completed.[/yellow]")
 
-
+    console.print(
+        Align.center(
+            "[bold cyan]Thank you for using the ECG PTB-XL Detection Pipeline![/bold cyan]"
+        )
+    )
 if __name__ == "__main__":
     main()
 
