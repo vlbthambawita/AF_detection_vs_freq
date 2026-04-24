@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, Subset
 from loader import load_kfold, ECGDataset
 from models.cnn1d import CNN1D
 from models.cnn_lstm import CNN_LSTM_ECG
+from models.transformer1d import Transformer1D
 from sklearn.metrics import roc_auc_score
 
 
@@ -412,8 +413,12 @@ def run_test_only(data_path, model_name):
 
         if model_name == "cnn1d":
             m = CNN1D(in_ch, num_classes)
-        else:
+        elif model_name == "cnn_lstm":
             m = CNN_LSTM_ECG(in_channels=in_ch, num_classes=num_classes)
+        elif model_name == "transformer1d":
+            m = Transformer1D(in_channels=in_ch, num_classes=num_classes)
+        else:
+            raise ValueError(f"Unknown model type: {model_name}")
 
         ckpt = (
             Path("checkpoints")
@@ -458,7 +463,7 @@ def main():
     parser.add_argument("--data_path", required=True)
     #--------- Model choice either cnn1d or cnn_lstm----------
     parser.add_argument("--model",
-    choices=["cnn1d", "cnn_lstm"],
+    choices=["cnn1d", "cnn_lstm", "transformer1d"],
     required=True)
     #---------Only testing (skip training) flag ----------
     parser.add_argument(
@@ -517,6 +522,9 @@ def main():
         
         elif args.model == "cnn_lstm":
             model = CNN_LSTM_ECG(in_channels=in_ch, num_classes=num_classes)
+
+        elif args.model == "transformer1d":
+            model = Transformer1D(in_channels=in_ch, num_classes=num_classes)
         
         else:
             raise ValueError(f"Unknown model type: {args.model}")
@@ -663,6 +671,9 @@ def main():
        
         elif args.model == "cnn_lstm":
             m = CNN_LSTM_ECG(in_channels=in_ch, num_classes=num_classes)
+
+        elif args.model == "transformer1d":
+            m = Transformer1D(in_channels=in_ch, num_classes=num_classes)
        
 
         else:
