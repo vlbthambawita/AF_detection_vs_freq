@@ -1,32 +1,24 @@
 """
 ecg_data_preprocessor.py
 
-Universal ECG preprocessing 
-----------------------------------
-This script serves as the global standard for ECG signal processing in this pipeline. 
-It handles resampling, normalization, segmentation, and patient-safe balancing.
-This logic is finalized and should not be modified unless implementing global feature updates 
-for example, lead selection or multi-label support.
+Memory-safer ECG preprocessing pipeline.
 
-what this script/pipeline do:
-- Convert raw ECG records into clean, fixed-length segments(10s) if they are not already.
-- Resample to multiple target sampling rates for example 500/250/100 Hz or any other rates.
-    (the pipeline does NOT resample when the original sampling rate already matches the target).
-- Enforce patient-safe splitting (train/val/test or K-fold)
-- Apply record-level AFIB vs NORMAL balancing
-- Save processed tensors (.pt) and metadata (.csv)
+Balancing modes:
+- none   : no balancing; folds/splits keep natural distribution
+- fold   : balance each fold independently; validation fold is also balanced
+- global : globally downsample majority class before saving folds/splits
+- train  : keep folds/splits natural here; training balancing happens in train.py/loader.py
 
-Leakage safaty garantee
--------------------------------------------------------------------------------
-- Patients are the main unit of splitting.
-- No patient ever appears in more than one fold or split.
-- Segments inherit the patient assignment of their parent record.
-- PTB-XL official strat_fold is respected when folds=10.
-
+Recommended scientific setup:
+- Preprocessing: --balance_mode train
+- Training: balance only training subset per fold
+- Validation: natural/unbalanced
+- Test: natural/unbalanced + optional balanced secondary test
 """
 
 import os
 import csv
+import gc
 import logging
 from dataclasses import dataclass
 from typing import List
@@ -42,8 +34,7 @@ from tqdm.auto import tqdm
 # ================= Data Structure =================
 
 @dataclass
-# Represent a single ECG record and its associated metadata.
-class Record:               
+class Record:
     signal: np.ndarray
     fs: int
     label: int
@@ -52,81 +43,63 @@ class Record:
     fold: int | None = None
 
 
-
 # ================= Logger Setup =================
 
 def setup_logger(log_path: str) -> logging.Logger:
-    """
-    Creates a logger that writes both to console and to a file.
-
-    Ensures:
-        - Log directory exists
-        - Log file is overwritten each run
-        - Consistent formatting
-    """
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
     logger = logging.getLogger(log_path)
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
 
     fmt = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s")
 
-    # File handler
     fh = logging.FileHandler(log_path, mode="w")
     fh.setFormatter(fmt)
     logger.addHandler(fh)
 
-    # Consol handler
     sh = logging.StreamHandler()
     sh.setFormatter(fmt)
     logger.addHandler(sh)
 
     logger.info("Logger initialized successfully")
     return logger
-    
+
 
 # ================= Fold Utilities =================
 
 def assert_no_patient_leakage(folds_dict):
-    """
-    Make sure that no patient appears in more than one fold.
-
-    """
     seen = set()
+
     for fold, pids in folds_dict.items():
         overlap = seen & pids
+
         if overlap:
             raise RuntimeError(f"Patient leakage detected in fold {fold}: {overlap}")
+
         seen |= pids
 
 
 def build_patient_folds(records: List[Record], k: int, seed=42):
-    """
-    Builds patient-safe stratified folds.
-        - If PTB-XL official folds exist AND k=10, then use official folds.
-        - Otherwise, compute patient-level labels and run StratifiedKFold.
-
-    returns: dict: fold_id -> set(patient_ids)
-    """
-
-    # PTB‑XL official fold mode
     if records and records[0].fold is not None and k == 10:
         folds = defaultdict(set)
+
         for r in records:
             folds[r.fold].add(r.patient_id)
+
         assert_no_patient_leakage(folds)
         return dict(folds)
 
-    # Build patient‑level labels
     patient_labels = defaultdict(list)
+
     for r in records:
         patient_labels[r.patient_id].append(r.label)
 
     patients = list(patient_labels.keys())
     labels = [int(np.round(np.mean(patient_labels[p]))) for p in patients]
 
-    # Stratified K‑fold on patient level
     skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
+
     folds = {}
 
     for i, (_, idx) in enumerate(skf.split(patients, labels), start=1):
@@ -139,62 +112,65 @@ def build_patient_folds(records: List[Record], k: int, seed=42):
 # ================= Signal Processing =================
 
 def clean_signal(x):
-    """
-    Replace NaN and Inf values with zeros to avoid numerical issues.
-    """
-    return np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    return np.nan_to_num(
+        x,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0
+    ).astype(np.float32)
 
 
 def resample_signal(x, fs_in, fs_out):
-    """
-    Resample signal from fs_in to fs_out using scipy.signal.resample.
-
-    If sampling rate is unchanged, returns the input as float32.
-    """
     if fs_in == fs_out:
         return x.astype(np.float32)
+
     n = int(round(len(x) * fs_out / fs_in))
     return resample(x, n).astype(np.float32)
 
 
 def zscore(x):
-    """
-    Apply z-score normalization per lead (channel).
-    """
     mean = x.mean(axis=1, keepdims=True)
     std = x.std(axis=1, keepdims=True) + 1e-8
     return ((x - mean) / std).astype(np.float32)
 
 
 def make_segments(x, seg_len):
-    """
-    Slice signal into non-overlapping fixed-length segments.
-
-    Returns: List of segments, each of length seg_len.
-    """
-    return [x[i:i + seg_len] for i in range(0, len(x) - seg_len + 1, seg_len)]
-
-# ================= Signal Quality Corrections =================
-#  Flatline leads  are zeroed per segment
-#  Extreme amplitude outliers are clipped to stabilize training
+    return [
+        x[i:i + seg_len]
+        for i in range(0, len(x) - seg_len + 1, seg_len)
+    ]
 
 
-def zero_flatline_leads(x, eps=1e-6, min_flat_fraction=0.5):
+def zero_flatline_leads(x, fs, eps=1e-6, min_flat_seconds=3.0):
     """
-    Zero leads that are flat for too long.
-    x: (C, T)
-    returns: (x_fixed, num_zeroed_leads)
+    Zero leads that contain one continuous flatline lasting at least min_flat_seconds.
+    x shape: (C, T)
     """
+
     C, T = x.shape
     zeroed = 0
+
+    min_flat_samples = int(min_flat_seconds * fs)
 
     for c in range(C):
         dx = np.abs(np.diff(x[c]))
 
         signal_scale = np.std(x[c]) + 1e-8
-        flat_fraction = np.mean(dx < (eps * signal_scale))
+        threshold = eps * signal_scale
 
-        if flat_fraction >= min_flat_fraction:
+        flat_mask = dx < threshold
+
+        max_run = 0
+        current_run = 0
+
+        for is_flat in flat_mask:
+            if is_flat:
+                current_run += 1
+                max_run = max(max_run, current_run)
+            else:
+                current_run = 0
+
+        if max_run >= min_flat_samples:
             x[c] = 0.0
             zeroed += 1
 
@@ -202,26 +178,31 @@ def zero_flatline_leads(x, eps=1e-6, min_flat_fraction=0.5):
 
 
 def clip_extremes(x, clip_value=15.0):
-    """
-    Clip extreme amplitudes.
-    returns: (x_clipped, num_clipped_values)
-    """
     before = np.abs(x) > clip_value
     n_clipped = int(before.sum())
     x = np.clip(x, -clip_value, clip_value)
+
     return x, n_clipped
 
+
+def fix_shape(X_list):
+    """
+    Convert list of ECG segments to tensor shape (N, C, T).
+    """
+
+    X_np = np.stack(X_list)
+
+    if X_np.ndim == 3 and X_np.shape[1] > X_np.shape[2]:
+        X_np = np.transpose(X_np, (0, 2, 1))
+
+    return torch.tensor(X_np, dtype=torch.float32).contiguous()
 
 
 # ================= Hold-out Test Split =================
 
 def split_patients_test(records: List[Record], test_ratio: float, seed=42):
-    """
-    Patient-safe hold-out test split.
-    Returns:
-        trainval_records, test_records
-    """
     pid_to_labels = defaultdict(list)
+
     for r in records:
         pid_to_labels[r.patient_id].append(r.label)
 
@@ -238,10 +219,355 @@ def split_patients_test(records: List[Record], test_ratio: float, seed=42):
     trainval_pids = set(trainval_pids)
     test_pids = set(test_pids)
 
-    trainval_records = [r for r in records if r.patient_id in trainval_pids]
-    test_records     = [r for r in records if r.patient_id in test_pids]
+    trainval_records = [
+        r for r in records
+        if r.patient_id in trainval_pids
+    ]
+
+    test_records = [
+        r for r in records
+        if r.patient_id in test_pids
+    ]
 
     return trainval_records, test_records
+
+
+# ================= Helper Functions =================
+
+def get_split_key(record, folds, patient_folds, train_p=None, val_p=None):
+    if folds is None:
+        if record.patient_id in train_p:
+            return "train"
+        elif record.patient_id in val_p:
+            return "val"
+        else:
+            return "test"
+
+    for fid, pset in patient_folds.items():
+        if record.patient_id in pset:
+            return fid
+
+    raise RuntimeError(f"Patient {record.patient_id} not found in any fold")
+
+
+def process_record_to_segments(record, fs, seg_len, flatline_seconds=3.0):
+    sig = resample_signal(clean_signal(record.signal), record.fs, fs).T
+
+    sig, n_clipped = clip_extremes(sig, clip_value=15.0)
+
+    sig, n_zeroed = zero_flatline_leads(
+        sig,
+        fs=fs,
+        min_flat_seconds=flatline_seconds
+    )
+
+    sig = zscore(sig)
+
+    segments = make_segments(sig.T, seg_len)
+
+    del sig
+
+    return segments, n_clipped, n_zeroed
+
+
+def class_distribution_from_splits_by_class(splits_by_class):
+    total_afib = sum(
+        len(splits_by_class[k][1])
+        for k in splits_by_class.keys()
+    )
+
+    total_normal = sum(
+        len(splits_by_class[k][0])
+        for k in splits_by_class.keys()
+    )
+
+    return total_afib, total_normal
+
+
+def select_balanced_items(normal_items, afib_items, seed):
+    n = min(len(normal_items), len(afib_items))
+
+    if n == 0:
+        return [], 0
+
+    rng = np.random.default_rng(seed)
+
+    normal_idx = rng.choice(
+        len(normal_items),
+        n,
+        replace=False
+    )
+
+    afib_idx = rng.choice(
+        len(afib_items),
+        n,
+        replace=False
+    )
+
+    selected = (
+        [normal_items[i] for i in normal_idx] +
+        [afib_items[i] for i in afib_idx]
+    )
+
+    rng.shuffle(selected)
+
+    return selected, n
+
+
+def items_to_split_tuple(items):
+    if not items:
+        return [], [], [], []
+
+    X, y, rids, pids = zip(*items)
+
+    return list(X), list(y), list(rids), list(pids)
+
+
+def write_metadata_csv(csv_path, fs, split_col, splits):
+    segment_index = 0
+
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [split_col, "patient_id", "record_id", "label", "fs", "segment_index"]
+        )
+
+        for split, (X, y, rids, pids) in splits.items():
+            for i in range(len(y)):
+                writer.writerow(
+                    [
+                        split,
+                        str(pids[i]),
+                        str(rids[i]),
+                        int(y[i]),
+                        fs,
+                        segment_index,
+                    ]
+                )
+                segment_index += 1
+
+
+def build_splits_from_splits_by_class(
+    splits_by_class,
+    balance_mode,
+    folds,
+    seed,
+    logger,
+    fs,
+):
+    splits = defaultdict(lambda: ([], [], [], []))
+
+    total_afib, total_normal = class_distribution_from_splits_by_class(
+        splits_by_class
+    )
+
+    logger.info(f"[{fs}Hz] SEGMENT DISTRIBUTION BEFORE BALANCING")
+    logger.info(f"  AFIB segments   : {total_afib}")
+    logger.info(f"  NORMAL segments : {total_normal}")
+    logger.info(f"  TOTAL segments  : {total_afib + total_normal}")
+
+    # ---------- K-FOLD MODE ----------
+    if folds is not None:
+
+        if balance_mode in ("none", "train"):
+            logger.info(f"[{fs}Hz] K-FOLD MODE WITH balance_mode={balance_mode}")
+
+            if balance_mode == "train":
+                logger.info(
+                    f"[{fs}Hz] Folds are saved NATURAL/UNBALANCED. "
+                    "Training balancing must be applied in train.py/loader.py."
+                )
+            else:
+                logger.info(f"[{fs}Hz] No balancing applied.")
+
+            for fid in sorted(splits_by_class.keys()):
+                items = (
+                    splits_by_class[fid][0] +
+                    splits_by_class[fid][1]
+                )
+
+                splits[fid] = items_to_split_tuple(items)
+
+                logger.info(
+                    f"[{fs}Hz] fold {fid}: "
+                    f"AFIB={len(splits_by_class[fid][1])}, "
+                    f"NORMAL={len(splits_by_class[fid][0])}, "
+                    f"TOTAL={len(items)}"
+                )
+
+            logger.info(f"[{fs}Hz] TOTAL KEPT: {total_afib + total_normal}")
+            logger.info(f"[{fs}Hz] DROPPED   : 0")
+
+            return splits
+
+        if balance_mode == "fold":
+            logger.info(f"[{fs}Hz] FOLD-LEVEL BALANCING")
+            logger.info("  Rule: min(AFIB, NORMAL) per fold")
+
+            total_kept = 0
+            kept_afib = 0
+            kept_normal = 0
+
+            for fid in sorted(splits_by_class.keys()):
+                normal_items = splits_by_class[fid][0]
+                afib_items = splits_by_class[fid][1]
+
+                selected, n = select_balanced_items(
+                    normal_items,
+                    afib_items,
+                    seed + int(fid)
+                )
+
+                if n == 0:
+                    logger.warning(
+                        f"[{fs}Hz] fold {fid} has no balanced segments"
+                    )
+                    continue
+
+                splits[fid] = items_to_split_tuple(selected)
+
+                total_kept += 2 * n
+                kept_afib += n
+                kept_normal += n
+
+                logger.info(
+                    f"[{fs}Hz] fold {fid}: segments={2*n} "
+                    f"(AFIB={n}, NORMAL={n})"
+                )
+
+                del selected
+
+            logger.info(f"[{fs}Hz] BALANCED TOTAL")
+            logger.info(f"  AFIB kept   : {kept_afib}")
+            logger.info(f"  NORMAL kept : {kept_normal}")
+            logger.info(f"  TOTAL kept  : {total_kept}")
+            logger.info(
+                f"  DROPPED     : {(total_afib + total_normal) - total_kept}"
+            )
+
+            return splits
+
+        if balance_mode == "global":
+            logger.info(f"[{fs}Hz] GLOBAL BALANCING BEFORE FOLD SAVE")
+            logger.info("  Rule: keep min(total AFIB, total NORMAL) globally")
+
+            all_normal = []
+            all_afib = []
+
+            item_to_fold = {}
+
+            for fid in splits_by_class.keys():
+                for item in splits_by_class[fid][0]:
+                    all_normal.append(item)
+                    item_to_fold[id(item)] = fid
+
+                for item in splits_by_class[fid][1]:
+                    all_afib.append(item)
+                    item_to_fold[id(item)] = fid
+
+            selected, n = select_balanced_items(
+                all_normal,
+                all_afib,
+                seed
+            )
+
+            if n == 0:
+                raise RuntimeError(
+                    f"[{fs}Hz] Cannot globally balance: one class is empty."
+                )
+
+            temp_by_fold = defaultdict(list)
+
+            for item in selected:
+                fid = item_to_fold[id(item)]
+                temp_by_fold[fid].append(item)
+
+            for fid in sorted(temp_by_fold.keys()):
+                splits[fid] = items_to_split_tuple(temp_by_fold[fid])
+
+                y = [int(v[1]) for v in temp_by_fold[fid]]
+
+                logger.info(
+                    f"[{fs}Hz] fold {fid}: "
+                    f"AFIB={sum(y)}, NORMAL={len(y)-sum(y)}, TOTAL={len(y)}"
+                )
+
+            logger.info(f"[{fs}Hz] GLOBAL BALANCED TOTAL")
+            logger.info(f"  AFIB kept   : {n}")
+            logger.info(f"  NORMAL kept : {n}")
+            logger.info(f"  TOTAL kept  : {2*n}")
+            logger.info(
+                f"  DROPPED     : {(total_afib + total_normal) - (2*n)}"
+            )
+
+            del all_normal, all_afib, selected, temp_by_fold, item_to_fold
+
+            return splits
+
+        raise ValueError(f"Unknown balance_mode: {balance_mode}")
+
+    # ---------- NON-FOLD MODE ----------
+    logger.info(f"[{fs}Hz] SPLIT MODE WITH balance_mode={balance_mode}")
+
+    for split_key in sorted(splits_by_class.keys()):
+        normal_items = splits_by_class[split_key][0]
+        afib_items = splits_by_class[split_key][1]
+
+        if balance_mode == "none":
+            selected = normal_items + afib_items
+
+        elif balance_mode == "train":
+            if split_key == "train":
+                selected, n = select_balanced_items(
+                    normal_items,
+                    afib_items,
+                    seed
+                )
+
+                if n == 0:
+                    logger.warning(
+                        f"[{fs}Hz] Train balancing skipped: one class missing"
+                    )
+                    selected = normal_items + afib_items
+                else:
+                    logger.info(
+                        f"[{fs}Hz] TRAIN-ONLY BALANCE APPLIED: "
+                        f"AFIB={n}, NORMAL={n}"
+                    )
+            else:
+                selected = normal_items + afib_items
+
+        elif balance_mode in ("global", "fold"):
+            selected, n = select_balanced_items(
+                normal_items,
+                afib_items,
+                seed
+            )
+
+            if n == 0:
+                logger.warning(
+                    f"[{fs}Hz] Balancing skipped for {split_key}: one class missing"
+                )
+                selected = normal_items + afib_items
+            else:
+                logger.info(
+                    f"[{fs}Hz] BALANCE APPLIED TO {split_key}: "
+                    f"AFIB={n}, NORMAL={n}"
+                )
+
+        else:
+            raise ValueError(f"Unknown balance_mode: {balance_mode}")
+
+        splits[split_key] = items_to_split_tuple(selected)
+
+        y = [int(v[1]) for v in selected]
+
+        logger.info(
+            f"[{fs}Hz] {split_key}: "
+            f"AFIB={sum(y)}, NORMAL={len(y)-sum(y)}, TOTAL={len(y)}"
+        )
+
+    return splits
 
 
 # ================= Main Pipeline =================
@@ -257,20 +583,15 @@ def prepare_dataset(
     balance_mode="global",
     folds=None,
     test_ratio=None,
+    flatline_seconds=3.0,
     seed=42,
 ):
-    """
-    Main preprocessing pipeline.
-
-      This function takes raw Record objects and produces a fully processed,
-    leakage-safe dataset ready for model training. It handles cleaning,
-    resampling, normalization, segmentation, balancing, and patient-level
-    splitting, and saves both metadata and tensor files to disk.
-    """
     logger = setup_logger(os.path.join("logs", f"{dataset_name}.log"))
 
-
-   # ================= Dataset Summary =================
+    if balance_mode not in ("none", "train", "global", "fold"):
+        raise ValueError(
+            "balance_mode must be one of: none, train, global, fold"
+        )
 
     labels = [r.label for r in records]
     patients = {r.patient_id for r in records}
@@ -279,20 +600,21 @@ def prepare_dataset(
     logger.info("DATASET SUMMARY (RAW RECORDS)")
     logger.info(f"  Total records  : {len(records)}")
     logger.info(f"  Total patients : {len(patients)}")
-    logger.info(f"  AFIB records   : {c.get(1,0)}")
-    logger.info(f"  NORMAL records : {c.get(0,0)}")
+    logger.info(f"  AFIB records   : {c.get(1, 0)}")
+    logger.info(f"  NORMAL records : {c.get(0, 0)}")
+    logger.info(f"  Balance mode   : {balance_mode}")
+    logger.info(f"  Flatline rule  : continuous >= {flatline_seconds} seconds")
 
-
-
-    # ================= Optional Hold-out Test Split (ADDED FEATURE) =================
-
+    # ---------- Optional hold-out test ----------
     test_records = None
 
     if test_ratio is not None:
         logger.info(f"HOLD-OUT TEST MODE ENABLED (test_ratio={test_ratio})")
 
         records, test_records = split_patients_test(
-            records, test_ratio, seed
+            records,
+            test_ratio,
+            seed
         )
 
         logger.info(
@@ -301,46 +623,20 @@ def prepare_dataset(
             f"test={len({r.patient_id for r in test_records})}"
         )
 
-
-
-   # ================= Record-Level Balancing =================
-
-    if balance_mode == "global" and folds is None:
-        # Separate AFIB and NORMAL records
-        afib = [r for r in records if r.label == 1]
-        normal = [r for r in records if r.label == 0]
-
-        # Balance by taking equal number of each
-        n = min(len(afib), len(normal))
-      
-
-        rng = np.random.default_rng(seed)
-
-        # Randomly sample balanced records
-        records = list(rng.choice(afib, n, replace=False)) + \
-                  list(rng.choice(normal, n, replace=False))
-        rng.shuffle(records)
-
-        logger.info("BALANCING RULE APPLIED (RECORD LEVEL)")
-        logger.info(f"  AFIB kept   : {n}")
-        logger.info(f"  NORMAL kept : {n}")
-        logger.info(f"  Total kept  : {2*n}")
-
-
-    # ================= Patient-Safe Splitting =================
-
+    # ---------- Patient-safe split/folds ----------
     if folds is not None:
-        # K‑fold mode
         logger.info(f"FOLD MODE ENABLED (K={folds})")
         patient_folds = build_patient_folds(records, folds, seed)
+
+        train_p = None
+        val_p = None
+
     else:
-        # Standard train/val/test split (patient‑safe)
         pid_to_label = {r.patient_id: r.label for r in records}
 
         pids = np.array(list(pid_to_label.keys()))
         pid_labels = np.array([pid_to_label[p] for p in pids])
 
-        # Train vs temp
         train_p, temp, train_y, temp_y = train_test_split(
             pids,
             pid_labels,
@@ -357,48 +653,44 @@ def prepare_dataset(
             random_state=seed,
         )
 
+        train_p = set(train_p)
+        val_p = set(val_p)
 
-    # ================= ENSURE ≥1 AFIB PATIENT IN TRAIN (ONLY IF max_samples SET) =================
+        patient_folds = None
 
-    if max_samples is not None and folds is None:
-        train_afib_pids = {
-            r.patient_id for r in records
-            if r.patient_id in train_p and r.label == 1
-        }
-
-        if len(train_afib_pids) == 0:
-            raise RuntimeError(
-                "Invalid split with max_samples enabled: "
-                "TRAIN contains no AFIB patients. "
-                "Reduce test_ratio, increase max_samples, or change seed."
-            )
-
-
-
-
-
-    # ================= Process each Sampling Rate =================
+    # ================= Process each sampling rate =================
 
     for fs in target_fs:
+        logger.info("=" * 70)
+        logger.info(f"START PROCESSING {fs} Hz")
+        logger.info("=" * 70)
+
         out_dir = os.path.join(out_root, dataset_name, f"{fs}hz")
         os.makedirs(out_dir, exist_ok=True)
 
         seg_len = fs * segment_seconds
-        segments = []
 
         records_with_clipping = 0
         records_with_flatlines = 0
 
+        splits_by_class = defaultdict(lambda: {0: [], 1: []})
 
-        
-        # Segment creation
-        
+        # ---------- Stream records into split/fold containers ----------
         for r in tqdm(records, desc=f"{fs}Hz"):
-            # Clean → resample → transpose → zscore → transpose back
-            sig = resample_signal(clean_signal(r.signal), r.fs, fs).T
+            split_key = get_split_key(
+                r,
+                folds=folds,
+                patient_folds=patient_folds,
+                train_p=train_p,
+                val_p=val_p,
+            )
 
-            sig, n_clipped = clip_extremes(sig, clip_value=15.0)
-            sig, n_zeroed = zero_flatline_leads(sig)
+            segs, n_clipped, n_zeroed = process_record_to_segments(
+                r,
+                fs,
+                seg_len,
+                flatline_seconds=flatline_seconds
+            )
 
             if n_clipped > 0:
                 records_with_clipping += 1
@@ -406,19 +698,14 @@ def prepare_dataset(
             if n_zeroed > 0:
                 records_with_flatlines += 1
 
-            sig = zscore(sig)
+            for seg in segs:
+                splits_by_class[split_key][int(r.label)].append(
+                    (seg, int(r.label), r.record_id, r.patient_id)
+                )
 
+            del segs
 
-            # Create fixed‑length segments
-            for seg in make_segments(sig.T, seg_len):
-                segments.append((seg, r.label, r.record_id, r.patient_id))
-
-        logger.info(f"[{fs}Hz] SEGMENTS CREATED: {len(segments)}")
-
-        if dataset_name.startswith(("ptbxl", "ecg-arrhythmia")):
-            logger.info(
-                "Note: For this dataset, one segment corresponds to one ECG record."
-            )
+        gc.collect()
 
         logger.info(
             f"[{fs}Hz] QC SUMMARY: "
@@ -426,376 +713,80 @@ def prepare_dataset(
             f"{records_with_flatlines}/{len(records)} records had at least 1 flatline lead"
         )
 
-
-
-
-        # Segment distribution BEFORE balancing
-        seg_labels = [s[1] for s in segments]
-        seg_counter = Counter(seg_labels)
-
-        logger.info(f"[{fs}Hz] SEGMENT DISTRIBUTION (BEFORE BALANCING)")
-        logger.info(f"  AFIB segments   : {seg_counter.get(1, 0)}")
-        logger.info(f"  NORMAL segments : {seg_counter.get(0, 0)}")
-        logger.info(f"  TOTAL segments  : {len(segments)}")
-
-
-        # ================= Global Segment Balancing =================
-
-
-        #  If No Folds(not selected) so Global Segment Balancing 
-        if folds is not None:
-            afib = [s for s in segments if s[1] == 1]
-            normal = [s for s in segments if s[1] == 0]
-
-            rng = np.random.default_rng(seed)
-            n = min(len(afib), len(normal))
-
-            if max_samples is not None:
-                n = min(n, max_samples // 2)
-
-            if n == 0:
-                raise RuntimeError("No segments available after balancing")
-
-            # Randomly sample balanced segments
-            afib_idx = rng.choice(len(afib), n, replace=False)
-            norm_idx = rng.choice(len(normal), n, replace=False)
-
-            segments = (
-                [afib[i] for i in afib_idx] +
-                [normal[i] for i in norm_idx]
-            )
-            rng.shuffle(segments)
-
-            logger.info(f"[{fs}Hz] GLOBAL SEGMENT BALANCE APPLIED")
-            logger.info(f"  AFIB segments   : {n}")
-            logger.info(f"  NORMAL segments : {n}")
-            logger.info(f"  TOTAL segments  : {2*n}")
-
-        # ================= Distribute Segments =================
-
-        splits = defaultdict(lambda: ([], [], [], []))
-
-
-        
-
-        for seg, lbl, rid, pid in segments:
-            if folds is None:
-                # All segments from the same patient go to the same split.
-                split = (
-                    "train" if pid in train_p else
-                    "val" if pid in val_p else
-                    "test"
-                )
-            else:
-                # Finds which fold contains that patient, and assigns the segment to that fold.
-                for fid, pset in patient_folds.items():
-                    if pid in pset:
-                        split = fid
-                        break
-
-            # Append segment to appropriate split/fold
-            splits[split][0].append(seg)
-            splits[split][1].append(lbl)
-            splits[split][2].append(rid)
-            splits[split][3].append(pid)
-
-        
-
-        # ================= GLOBAL SAMPLE CAP (ALL MODES) =================
-        # Applied ONLY if max_samples is set
-
-        if max_samples is not None:
-
-            logger.info(f"[{fs}Hz] GLOBAL SAMPLE CAP APPLIED (max_samples={max_samples})")
-
-            logger.info(
-                f"[{fs}Hz] NOTE: max_samples is a TARGET, not a guarantee."
-            )
-            logger.info(
-                f"[{fs}Hz] Reason: patient-level splitting and per-fold balancing "
-                f"may require dropping samples to preserve patient integrity "
-                f"and class balance."
-            )
-
-
-            # Identify CV vs TEST containers
-            if folds is not None:
-                cv_keys = list(splits.keys())   # fold ids
-                test_key = "test"
-            else:
-                cv_keys = ["train", "val"]
-                test_key = "test"
-
-            # ---- budgets ----
-            if test_ratio is not None:
-                test_cap = int(test_ratio * max_samples)
-            elif folds is None:
-                # split mode: behave exactly like before (70/20/10)
-                test_cap = int(split_ratio[2] * max_samples)
-            else:
-                test_cap = 0
-
-            cv_cap   = max_samples - test_cap
-
-            if folds is not None and test_ratio is not None:
-                logger.info(
-                    f"[{fs}Hz] CV cap (folds combined) : {cv_cap}"
-                )
-                logger.info(
-                    f"[{fs}Hz] Test cap               : {test_cap}"
-                )
-
-
-            def cap_container(container, cap):
-                X, y, rids, pids = container
-                if len(y) <= cap:
-                    return container
-
-                rng = np.random.default_rng(seed)
-                idx = rng.choice(len(y), cap, replace=False)
-
-                return (
-                    [X[i] for i in idx],
-                    [y[i] for i in idx],
-                    [rids[i] for i in idx],
-                    [pids[i] for i in idx],
-                )
-
-            # ---- cap TEST ----
-            if test_key in splits and test_cap > 0:
-                splits[test_key] = cap_container(splits[test_key], test_cap)
-
-            # ---- cap CV ----
-            # flatten CV first
-            cv_X, cv_y, cv_rids, cv_pids = [], [], [], []
-            for k in cv_keys:
-                X, y, rids, pids = splits[k]
-                cv_X.extend(X)
-                cv_y.extend(y)
-                cv_rids.extend(rids)
-                cv_pids.extend(pids)
-
-            cv_capped = cap_container((cv_X, cv_y, cv_rids, cv_pids), cv_cap)
-
-            # wipe old CV containers
-            for k in cv_keys:
-                splits[k] = ([], [], [], [])
-
-            # reassign CV samples (folds handled later)
-            splits["_cv_buffer"] = cv_capped
-
-            # ================= APPLY CAPPED CV BUFFER =================
-            # (ADDED — REQUIRED)
-
-            if folds is not None:
-                # Rebuild folds from capped CV buffer
-                X, y, rids, pids = splits["_cv_buffer"]
-
-                for fid in cv_keys:
-                    splits[fid] = ([], [], [], [])
-
-                for seg, lbl, rid, pid in zip(X, y, rids, pids):
-                    for fid, pset in patient_folds.items():
-                        if pid in pset:
-                            splits[fid][0].append(seg)
-                            splits[fid][1].append(lbl)
-                            splits[fid][2].append(rid)
-                            splits[fid][3].append(pid)
-                            break
-
-            else:
-                # Classic split: rebuild train/val from capped CV
-                X, y, rids, pids = splits["_cv_buffer"]
-
-                splits["train"] = ([], [], [], [])
-                splits["val"]   = ([], [], [], [])
-
-                for seg, lbl, rid, pid in zip(X, y, rids, pids):
-                    split = "train" if pid in train_p else "val"
-                    splits[split][0].append(seg)
-                    splits[split][1].append(lbl)
-                    splits[split][2].append(rid)
-                    splits[split][3].append(pid)
-
-            del splits["_cv_buffer"]
-
-
-
-
-
-        # ================= Train-Only Segment Balancing (Medical-Safe) =================
-
-
-        if folds is None and balance_mode == "train":
-
-            X, y, rids, pids = splits["train"]
-
-            afib_idx = [i for i, lbl in enumerate(y) if lbl == 1]
-            norm_idx = [i for i, lbl in enumerate(y) if lbl == 0]
-
-            logger.info(
-                f"[{fs}Hz] Train class counts before balancing: "
-                f"AFIB={len(afib_idx)}, NORMAL={len(norm_idx)}"
-            )
-            n = min(len(afib_idx), len(norm_idx))
-
-        
-
-            if n == 0:
-                logger.warning(
-                    f"[{fs}Hz] Train balancing skipped: one class missing in train split "
-                    f"(AFIB={len(afib_idx)}, NORMAL={len(norm_idx)})."
-                )
-                # Do NOT rebalance, keep train as-is
-                pass
-            else:
-                rng = np.random.default_rng(seed)
-                keep_idx = (
-                    list(rng.choice(afib_idx, n, replace=False)) +
-                    list(rng.choice(norm_idx, n, replace=False))
-                )
-                rng.shuffle(keep_idx)
-
-                splits["train"] = (
-                    [X[i] for i in keep_idx],
-                    [y[i] for i in keep_idx],
-                    [rids[i] for i in keep_idx],
-                    [pids[i] for i in keep_idx],
-                )
-
-                logger.info(f"[{fs}Hz] TRAIN-ONLY SEGMENT BALANCE APPLIED")
-                logger.info(f"  AFIB train segments   : {n}")
-                logger.info(f"  NORMAL train segments : {n}")
-                logger.info(f"  TOTAL train segments  : {2*n}")
-
-
-        # ================= Fold-Level Segment Balancing =================
-
-        if folds is not None:
-
-            
-            
-
-            logger.info(f"[{fs}Hz] SEGMENT BALANCING APPLIED (FOLD LEVEL)")
-            logger.info("  Rule: min(AFIB, NORMAL) per fold")
-
-            per_fold_total = (
-                max_samples // folds if max_samples is not None else None
-            )
-
-            #  accumulators (logging only)
-            fold_logs = []        # store fold messages
-            total_kept = 0
-            kept_afib = 0
-            kept_normal = 0
-
-            for fid in list(splits.keys()):
-                X, y, rids, pids = splits[fid]
-
-                afib_idx = [i for i, lbl in enumerate(y) if lbl == 1]
-                norm_idx = [i for i, lbl in enumerate(y) if lbl == 0]
-
-                n = min(len(afib_idx), len(norm_idx))
-
-                if per_fold_total is not None:
-                    n = min(n, per_fold_total // 2)
-
-                if n == 0:
-                    logger.warning(f"[{fs}Hz] fold {fid} has no balanced segments")
-                    splits[fid] = ([], [], [], [])
-                    fold_logs.append((fid, 0, 0, 0))  # >>> ADDED
-                    continue
-
-                rng = np.random.default_rng(seed + int(fid))
-                keep_idx = (
-                    list(rng.choice(afib_idx, n, replace=False)) +
-                    list(rng.choice(norm_idx, n, replace=False))
-                )
-                rng.shuffle(keep_idx)
-
-                splits[fid] = (
-                    [X[i] for i in keep_idx],
-                    [y[i] for i in keep_idx],
-                    [rids[i] for i in keep_idx],
-                    [pids[i] for i in keep_idx],
-                )
-
-                #  collect stats only
-                total_kept += 2 * n
-                kept_afib += n
-                kept_normal += n
-                fold_logs.append((fid, 2*n, n, n))
-
-            # GLOBAL summary (ONCE, before fold logs)
-            logger.info(f"[{fs}Hz] SEGMENT BALANCING APPLIED")
-            logger.info(f"  AFIB kept   : {kept_afib}")
-            logger.info(f"  NORMAL kept : {kept_normal}")
-            logger.info(f"  TOTAL kept  : {total_kept}")
-            logger.info(f"  DROPPED     : {len(segments) - total_kept}")
-
-        
-            for fid, tot, a, n in fold_logs:
-                logger.info(
-                    f"[{fs}Hz] fold {fid}: segments={tot} (AFIB={a}, NORMAL={n})"
-                )
-
-                
-
-        # ================= Save Data =================
-
-        # Always save CSV metadata
-        all_X, all_y, all_rids, all_pids, all_splits = [], [], [], [], []
-
-        for split, (X, y, rids, pids) in splits.items():
-            all_X.extend(X)
-            all_y.extend(y)
-            all_rids.extend(rids)
-            all_pids.extend(pids)
-            all_splits.extend([split] * len(y))
-
-        
-        all_pids  = [str(pid) for pid in all_pids]
-        all_rids  = [str(rid) for rid in all_rids]
-        all_y     = [int(lbl) for lbl in all_y]
-
-        split_col = "fold" if folds is not None else "split"
+        # ---------- Build final splits ----------
+        splits = build_splits_from_splits_by_class(
+            splits_by_class=splits_by_class,
+            balance_mode=balance_mode,
+            folds=folds,
+            seed=seed,
+            logger=logger,
+            fs=fs,
+        )
+
+        gc.collect()
+
+        # ---------- Save metadata and tensors ----------
         csv_path = os.path.join(out_dir, f"samples_{fs}hz.csv")
-        
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [split_col, "patient_id", "record_id", "label", "fs", "segment_index"]
-            )
-            for i in range(len(all_y)):
+
+        if folds is not None:
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
                 writer.writerow(
-                    [all_splits[i], all_pids[i], all_rids[i], all_y[i], fs, i]
+                    ["fold", "patient_id", "record_id", "label", "fs", "segment_index"]
                 )
 
-        # Reshape if not correcect (N, C, T)
+                segment_index = 0
 
-        def fix_shape(X_list):
-            X_np = np.stack(X_list)  # (N, T, C) or (N, C, T)
-            if X_np.ndim == 3 and X_np.shape[1] > X_np.shape[2]:
-                X_np = np.transpose(X_np, (0, 2, 1))  # -> (N, C, T)
-            return torch.tensor(X_np).contiguous()
-        
-        # Save data.pt only if Fold Mode
-        if folds is not None:
-            X_tensor = fix_shape(all_X)
-            torch.save(
-                {
-                    "X": X_tensor,
-                    "y": torch.tensor(all_y),
-                    "record_ids": all_rids,
-                    "patient_ids": all_pids,
-                },
-                os.path.join(out_dir, "data.pt"),
+                for fid in sorted(splits.keys()):
+                    X, y, rids, pids = splits[fid]
+
+                    if len(X) == 0:
+                        logger.warning(f"[{fs}Hz] fold_{fid}.pt is empty — skipping")
+                        continue
+
+                    for i in range(len(y)):
+                        writer.writerow(
+                            [
+                                fid,
+                                str(pids[i]),
+                                str(rids[i]),
+                                int(y[i]),
+                                fs,
+                                segment_index,
+                            ]
+                        )
+                        segment_index += 1
+
+                    X_tensor = fix_shape(X)
+                    y_tensor = torch.tensor(y, dtype=torch.long)
+
+                    torch.save(
+                        {
+                            "X": X_tensor,
+                            "y": y_tensor,
+                            "record_ids": [str(v) for v in rids],
+                            "patient_ids": [str(v) for v in pids],
+                        },
+                        os.path.join(out_dir, f"fold_{fid}.pt"),
+                    )
+
+                    logger.info(
+                        f"[{fs}Hz] saved fold_{fid}.pt "
+                        f"(samples={len(y)}, AFIB={sum(y)}, NORMAL={len(y)-sum(y)})"
+                    )
+
+                    del X_tensor
+                    del y_tensor
+                    gc.collect()
+
+        else:
+            write_metadata_csv(
+                csv_path=csv_path,
+                fs=fs,
+                split_col="split",
+                splits=splits,
             )
 
-            logger.info(f"[{fs}Hz] saved data.pt (fold mode)")
-
-        # Save train.pt, val.pt, test.pt only if None Fold Mode
-        else:
             for split in ("train", "val", "test"):
                 X, y, rids, pids = splits.get(split, ([], [], [], []))
 
@@ -808,9 +799,9 @@ def prepare_dataset(
                 torch.save(
                     {
                         "X": X_tensor,
-                        "y": torch.tensor(y),
-                        "record_ids": rids,
-                        "patient_ids": pids,
+                        "y": torch.tensor(y, dtype=torch.long),
+                        "record_ids": list(rids),
+                        "patient_ids": list(pids),
                     },
                     os.path.join(out_dir, f"{split}.pt"),
                 )
@@ -820,48 +811,70 @@ def prepare_dataset(
                     f"(samples={len(y)}, AFIB={sum(y)}, NORMAL={len(y)-sum(y)})"
                 )
 
-        # ================= Save HOLD-OUT TEST SET  =================
+                del X_tensor
+                gc.collect()
 
+        gc.collect()
+
+        # ---------- Save hold-out test ----------
         if test_records is not None:
             test_dir = os.path.join(out_root, dataset_name, f"{fs}hz", "test")
             os.makedirs(test_dir, exist_ok=True)
 
-            test_segments = []
-            
+            test_X = []
+            test_y = []
+            test_rids = []
+            test_pids = []
 
-            for r in test_records:
-                sig = resample_signal(clean_signal(r.signal), r.fs, fs).T
-                sig, _ = clip_extremes(sig)
-                sig, _ = zero_flatline_leads(sig)
-                sig = zscore(sig)
+            logger.info(f"[{fs}Hz] Processing hold-out test set")
 
-                for seg in make_segments(sig.T, seg_len):
-                    test_segments.append((seg, r.label, r.record_id, r.patient_id))
+            for r in tqdm(test_records, desc=f"{fs}Hz test"):
+                segs, _, _ = process_record_to_segments(
+                    r,
+                    fs,
+                    seg_len,
+                    flatline_seconds=flatline_seconds
+                )
 
-            if max_samples is not None and test_ratio is not None:
-                test_cap = int(test_ratio * max_samples)
-                if len(test_segments) > test_cap:
-                    rng = np.random.default_rng(seed)
-                    idx = rng.choice(len(test_segments), test_cap, replace=False)
-                    test_segments = [test_segments[i] for i in idx]
+                for seg in segs:
+                    test_X.append(seg)
+                    test_y.append(int(r.label))
+                    test_rids.append(str(r.record_id))
+                    test_pids.append(str(r.patient_id))
 
-            if test_segments:
-                X_t, y_t, rids, pids = zip(*test_segments)
+                del segs
 
-                X_tensor = fix_shape(list(X_t))
+            if test_X:
+                X_tensor = fix_shape(test_X)
 
                 torch.save(
                     {
                         "X": X_tensor,
-                        "y": torch.tensor(y_t),
-                        "record_ids": list(rids),
-                        "patient_ids": list(pids),
+                        "y": torch.tensor(test_y, dtype=torch.long),
+                        "record_ids": test_rids,
+                        "patient_ids": test_pids,
                     },
                     os.path.join(test_dir, "test.pt"),
                 )
 
                 logger.info(
                     f"[{fs}Hz] saved HOLD-OUT test.pt "
-                    f"(samples={len(y_t)}, AFIB={sum(y_t)}, NORMAL={len(y_t)-sum(y_t)})"
+                    f"(samples={len(test_y)}, AFIB={sum(test_y)}, NORMAL={len(test_y)-sum(test_y)})"
                 )
 
+                del X_tensor
+
+            del test_X
+            del test_y
+            del test_rids
+            del test_pids
+
+            gc.collect()
+
+        # ---------- Full cleanup after this frequency ----------
+        del splits
+        del splits_by_class
+
+        gc.collect()
+
+        logger.info(f"[{fs}Hz] Memory cleaned after saving")
