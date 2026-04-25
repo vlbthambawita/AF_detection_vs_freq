@@ -1,181 +1,250 @@
+
+
 # SEARCH_AF_detection_OsloMet_BachelorGroup
 
-Pipeline for detecting **Atrial Fibrillation (AFIB)** from **PTB-XL ECG** recordings using deep learning (**CNN1D** and **CNN–LSTM**) with **patient-safe splitting**, **K-fold cross-validation**, and optional **hold-out test** evaluation.
+Pipeline for **AFIB vs NORMAL ECG classification** using **PTB-XL**, with:
+
+* Patient-safe splitting
+* K-fold cross-validation
+* CNN1D and CNN–LSTM models
+* Optional hold-out test evaluation
 
 ---
 
-## What this project does (high level)
-
-1. **Load PTB-XL**
-   - Reads ECG signals and metadata
-   - Keeps only the **AFIB vs NORMAL** subset
-
-2. **Preprocess ECG (universal pipeline)**
-   - Cleaning (NaN/Inf handling)
-   - Resampling to target sampling rates (62/100/250/500 Hz)
-   - Z-score normalization per lead
-   - Segmenting into fixed **10 s segments**
-   - Optional signal QC: clipping extremes and zeroing flatline leads
-
-3. **Leakage safety (patient-safe splitting)**
-   - **Patients are the unit of splitting**
-   - No patient appears in multiple folds or splits
-   - Segments inherit the fold/split of the parent record/patient
-   - If `--folds 10` and PTB-XL official `strat_fold` exists, the pipeline can use PTB-XL official folds
-
-4. **Training and evaluation**
-   - K-fold training (default: **5-fold**)
-   - Saves per-fold checkpoints and ROC data
-   - Optional final hold-out **test** evaluation using an **ensemble** across folds (average logits)
-
----
+## Pipeline Overview
 
 ![ECG preprocessing pipeline](src/ecg_preprocessing_pipeline.png)
 
 ---
 
-## Important note on prevalence (class balance)
+# Installation
 
-This project can apply balancing to create an approximately **50/50 AFIB vs NORMAL** dataset (prevalence ≈ 0.5). That means:
-
-- Training/evaluation results reflect performance on a **balanced** distribution
-- Real clinical prevalence may differ, so metrics like accuracy can change under real-world distributions
+```bash
+git clone <repo>
+cd SEARCH_AF_detection_OsloMet_BachelorGroup
+python -m venv venv
+venv\Scripts\activate   # Windows
+pip install -r requirements.txt
+```
 
 ---
 
-## Dataset download
+# Dataset
 
-Download the PTB-XL dataset:
-- PTB-XL on PhysioNet: https://physionet.org/content/ptb-xl/1.0.3/
-- Extract the dataset to your preferred location
+Download PTB-XL:
+
+[https://physionet.org/content/ptb-xl/1.0.3/](https://physionet.org/content/ptb-xl/1.0.3/)
 
 ---
 
-## Quick start
+# 1. Data Preparation
 
-Run the interactive pipeline:
+```bash
+python src/ecg_preprocessing/ecg_data_loader.py ^
+  --dataset_path C:\path\to\ptb-xl ^
+  --name ptb-xl ^
+  --fs 250 ^
+  --out_root prepared_data ^
+  --folds 5 ^
+  --test_ratio 0.3 ^
+  --balance_mode train
+```
+
+---
+
+## Arguments (Data Preparation)
+
+### Core
+
+* `--dataset_path`
+  Path to raw PTB-XL
+
+* `--name`
+  Dataset name (e.g., `ptb-xl`)
+
+* `--fs`
+  Sampling rates
+  Example:
+
+  ```
+  --fs 62 100 250 500
+  ```
+
+---
+
+### Splitting
+
+* `--folds`
+  Number of folds (e.g., 5)
+
+* `--test_ratio`
+  Hold-out test split (patient-safe)
+  Example:
+
+  ```
+  0.3 → 30% patients reserved for final test
+  ```
+
+---
+
+### Balancing (IMPORTANT)
+
+* `--balance_mode train`  **(RECOMMENDED)**
+
+  * Preprocessing → no balancing
+  * Training → balanced
+  * Validation → natural
+  * Test → natural
+
+* `--balance_mode none`
+  No balancing anywhere
+
+* `--balance_mode fold`
+  Each fold balanced (NOT recommended for science)
+
+* `--balance_mode global`
+  Entire dataset balanced before splitting
+
+---
+
+## Output Structure
+
+```text
+prepared_data/ptb-xl/250hz/
+├── fold_1.pt
+├── fold_2.pt
+├── fold_3.pt
+├── fold_4.pt
+├── fold_5.pt
+├── samples_250hz.csv
+└── test/
+    └── test.pt
+```
+
+---
+
+# 2. Training
 
 ```bash
 cd src
-python main.py
 
-
-The main.py script will guide you through:
-1. **PTB-XL Data Location** - Specify where your PTB-XL data is stored
-2. **Data Preparation** - Choose to use existing prepared data or create new
-3. **Sampling Rate Selection** - Select one or more: 62 Hz, 100 Hz, 250 Hz, 500 Hz
-4. **Model Selection** - Choose CNN1D or CNN-LSTM
-5. **Training** - Run training with hardware requirements warning
-```
-## Project Structure
-
+python train.py ^
+  --data_path ..\prepared_data\ptb-xl\250hz ^
+  --model cnn1d ^
+  --train_balance downsample ^
+  --batch_size 8 ^
+  --device cuda
 ```
 
-SEARCH_AF_detection_OsloMet_BachelorGroup/
-├── src/
-│   ├── main.py                    # Interactive pipeline runner
-│   ├── train.py                    # Training script for models
-│   ├── loader.py                  # Data loading utilities
-│   ├── ecg_preprocessing/
-│   │   ├── ecg_data_prepare.py   # PTB-XL data loading
-│   │   └── ecg_data_preprocessor.py  # Signal preprocessing
-│   ├── models/
-│   │   ├── cnn1d.py               # 1D CNN model
-│   │   └── cnn_lstm.py            # CNN-LSTM model
-│   └── checkpoints/               # Saved model checkpoints
-│       └── ptb-xl/
-│           ├── 62hz/              # Models trained at 62 Hz
-│           ├── 100hz/             # Models trained at 100 Hz
-│           ├── 250hz/             # Models trained at 250 Hz
-│           └── 500hz/             # Models trained at 500 Hz
-├── requirements.txt
-└── README.md
+---
 
-```
+## Arguments (Training)
 
-## Data Preparation
+### Required
 
-To manually prepare the PTB-XL dataset:
+* `--data_path`
+  Path to prepared data
 
-```bash
-python src/ecg_preprocessing/ecg_data_loader.py \
-  --dataset_path /path/to/ptb-xl \
-  --name ptb-xl \
-  --fs 62 100 250 500 \
-  --out_root prepared_data \
-  --folds 5 \
-  --test_ratio 0.3 \
-  --balance_mode global
+* `--model`
 
-```
+  ```
+  cnn1d | cnn_lstm
+  ```
 
-Parameters:
-- `--dataset_path`: Path to raw PTB-XL data
-- `--name`: Dataset name (ptb-xl)
-- `--fs`: Target sampling rates (62, 100, 250, 500 Hz)
-- `--out_root`: Output directory for prepared data
-- `--test_ratio` 0.3 
-- `--folds`: Number of folds for cross-validation (5)
+---
 
-## Training Models
+### Training Behavior
 
-To train a model manually:
+* `--train_balance downsample`
 
-```bash
-cd src
-python train.py --data_path ../prepared_data/ptb-xl/100hz --model cnn1d
-```
+  * ONLY training set balanced
+  * Validation remains natural
+  * Matches scientific setup
 
-Parameters:
-- `--data_path`: Path to prepared data (e.g., prepared_data/ptb-xl/100hz)
-- `--model`: Model type - `cnn1d` or `cnn_lstm`
+---
 
-### Available Sampling Rates
-- 62 Hz - Lowest computational cost
-- 100 Hz - Balanced option
-- 250 Hz - Higher resolution
-- 500 Hz - Maximum resolution (original PTB-XL)
+### Hardware
 
-### Hardware Requirements
-For reasonable training performance:
-- **GPU (CUDA-enabled)** - RECOMMENDED
-- **OR** At least 12 CPU cores with multithreading
+* `--device cuda` → GPU (recommended)
+* `--device cpu` → slower
 
-Without adequate hardware, training will be very slow.
+---
 
-## Supported Labels
+### Optional
 
-- **NORMAL** - Normal sinus rhythm
-- **AFIB** - Atrial Fibrillation
+* `--batch_size`
+  Default: 32
+  Reduce if memory issues
 
+---
 
-## Models
+# 3. Testing
+
+After training:
+
+* Automatic test evaluation runs if `test.pt` exists
+* Ensemble of all folds is used
+
+---
+
+## Test Evaluation Types
+
+### Unbalanced (REALISTIC)
+
+* Uses natural distribution
+* Reflects real-world performance
+
+### Balanced
+
+* Downsampled test
+* Fair comparison across classes
+
+---
+
+# Scientific Setup (IMPORTANT)
+
+Recommended pipeline:
+
+| Stage      | Distribution |
+| ---------- | ------------ |
+| Training   | Balanced     |
+| Validation | Natural      |
+| Test       | Natural      |
+| Extra Test | Balanced     |
+
+---
+
+# Models
 
 ### CNN1D
-A 1D Convolutional Neural Network for ECG classification.
+
+* Learns local ECG morphology
+* QRS, waveform patterns
 
 ### CNN-LSTM
-A hybrid model combining CNN feature extraction with LSTM for sequence modeling.
 
-## Output
+* CNN → feature extraction
+* LSTM → temporal dependencies
 
-After training, checkpoints are saved to:
+---
+
+# Outputs
+
+```text
+src/checkpoints/ptb-xl/250hz/cnn1d/
+├── fold_1/
+│   ├── best.pt
+│   ├── last.pt
+│   ├── metrics.txt
+│   └── roc_val.npz
 ```
-src/checkpoints/ptb-xl/{sampling_rate}hz/{model_name}/fold_{1-5}/
-```
 
-Each fold contains:
-- `best.pt` - Best model weights (highest validation F1)
-- `last.pt` - Last epoch model weights
-- `metrics.txt` - Training metrics
-- `roc_val.npz` - ROC curve data
+---
 
-## License
+# Notes
 
-This project is developed for educational purposes.
+* **Patient-safe splitting is enforced**
+* No leakage between folds or test
+* Each segment inherits its patient split
 
-## References
-
-- PTB-XL Dataset: https://physionet.org/content/ptb-xl/1.0.3/
-- Original Paper: Wagner et al. (2020) - PTB-XL, a large publicly available ECG dataset
 
