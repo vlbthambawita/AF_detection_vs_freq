@@ -960,6 +960,21 @@ def main():
         y_true=y_true_u,
         y_score=y_prob_u,
     )
+    # ---------- ROC / AUROC / ECE: Balanced ----------
+    y_true_b, y_prob_b = evaluate_ensemble_with_probs(
+        models,
+        test_balanced_loader,
+        device,
+    )
+
+    auroc_b = roc_auc_score(y_true_b, y_prob_b)
+    ece_b = compute_ece_posclass(y_true_b, y_prob_b)
+
+    np.savez(
+        results_dir / "roc_test_balanced.npz",
+        y_true=y_true_b,
+        y_score=y_prob_b,
+    )
 
     # ================= SAVE TEST TABLE =================
 
