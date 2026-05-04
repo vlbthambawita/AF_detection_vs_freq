@@ -499,8 +499,24 @@ def run_test_only(
     test_ds.X = test_data["X"]
     test_ds.y = test_data["y"]
 
+    print_dataset_stats("Test unbalanced", test_ds)
+
     test_loader = make_loader(
         test_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        device=device,
+    )
+
+    test_balanced_ds = make_balanced_subset_binary(
+        test_ds,
+        seed=42,
+    )
+
+    print_dataset_stats("Test balanced", test_balanced_ds)
+
+    test_balanced_loader = make_loader(
+        test_balanced_ds,
         batch_size=batch_size,
         shuffle=False,
         device=device,
@@ -530,32 +546,66 @@ def run_test_only(
         m.to(device)
         models.append(m)
 
-    y_true, y_prob = evaluate_ensemble_with_probs(
+    out = Path("checkpoints") / dataset_name / f"{fs}hz" / model_name
+    out.mkdir(parents=True, exist_ok=True)
+
+    # ---------- Unbalanced test probabilities ----------
+    y_true_u, y_prob_u = evaluate_ensemble_with_probs(
         models,
         test_loader,
         device,
     )
 
-    auroc = roc_auc_score(y_true, y_prob)
-    ece = compute_ece_posclass(y_true, y_prob)
-
-    print(f"\nAUROC : {auroc:.4f}")
-    print(f"ECE   : {ece:.4f}")
-    print(f"Prob min/mean/max: {y_prob.min():.4f} / {y_prob.mean():.4f} / {y_prob.max():.4f}")
-    print(f"Positive rate    : {y_true.mean():.4f}")
-
-    out = Path("checkpoints") / dataset_name / f"{fs}hz" / model_name
-    out.mkdir(parents=True, exist_ok=True)
+    auroc_u = roc_auc_score(y_true_u, y_prob_u)
+    ece_u = compute_ece_posclass(y_true_u, y_prob_u)
 
     np.savez(
         out / "roc_test.npz",
-        y_true=y_true,
-        y_score=y_prob,
+        y_true=y_true_u,
+        y_score=y_prob_u,
     )
 
+    print("\nUNBALANCED TEST")
+    print(f"AUROC : {auroc_u:.4f}")
+    print(f"ECE   : {ece_u:.4f}")
+    print(f"Prob min/mean/max: {y_prob_u.min():.4f} / {y_prob_u.mean():.4f} / {y_prob_u.max():.4f}")
+    print(f"Positive rate    : {y_true_u.mean():.4f}")
     print("Saved:", out / "roc_test.npz")
 
+    # ---------- Balanced test probabilities ----------
+    y_true_b, y_prob_b = evaluate_ensemble_with_probs(
+        models,
+        test_balanced_loader,
+        device,
+    )
 
+    auroc_b = roc_auc_score(y_true_b, y_prob_b)
+    ece_b = compute_ece_posclass(y_true_b, y_prob_b)
+
+    np.savez(
+        out / "roc_test_balanced.npz",
+        y_true=y_true_b,
+        y_score=y_prob_b,
+    )
+
+    print("\nBALANCED TEST")
+    print(f"AUROC : {auroc_b:.4f}")
+    print(f"ECE   : {ece_b:.4f}")
+    print(f"Prob min/mean/max: {y_prob_b.min():.4f} / {y_prob_b.mean():.4f} / {y_prob_b.max():.4f}")
+    print(f"Positive rate    : {y_true_b.mean():.4f}")
+    print("Saved:", out / "roc_test_balanced.npz")
+
+    del models
+    del test_loader
+    del test_balanced_loader
+    del test_ds
+    del test_balanced_ds
+
+    gc.collect()
+
+    if device == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 # ================= MAIN =================
 
 def main():
