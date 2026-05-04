@@ -48,7 +48,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Compute final test AUROC, sensitivity, and positive-class ECE "
-            "from roc_test.npz files."
+            "from unbalanced and balanced test NPZ files."
         )
     )
 
@@ -57,13 +57,6 @@ def parse_args():
         type=Path,
         default=Path("checkpoints/ptbl-xl"),
         help="Root checkpoint directory. Default: checkpoints/ptbl-xl",
-    )
-
-    parser.add_argument(
-        "--pattern",
-        type=str,
-        default="roc_test.npz",
-        help="NPZ filename to search for. Default: roc_test.npz",
     )
 
     parser.add_argument(
@@ -97,7 +90,7 @@ def parse_args():
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Raise an error if no roc_test.npz files are found.",
+        help="Raise an error if no test NPZ files are found.",
     )
 
     return parser.parse_args()
@@ -107,9 +100,10 @@ def infer_freq_model(npz_path, root):
     """
     Expected path:
         root / <freq> / <model> / roc_test.npz
+        root / <freq> / <model> / roc_test_balanced.npz
 
     Example:
-        checkpoints/ptbl-xl/250hz/cnn_lstm/roc_test.npz
+        checkpoints/ptbl-xl/250hz/cnn_lstm/roc_test_balanced.npz
     """
 
     rel = npz_path.relative_to(root)
@@ -125,11 +119,27 @@ def infer_freq_model(npz_path, root):
     return freq, model
 
 
+def infer_test_type(npz_path):
+    if npz_path.name == "roc_test_balanced.npz":
+        return "Bal"
+    if npz_path.name == "roc_test.npz":
+        return "Unbal"
+    return "Unknown"
+
+
 def freq_as_int(freq):
     try:
         return int(str(freq).replace("hz", "").replace("Hz", ""))
     except ValueError:
         return 999999
+
+
+def test_type_order(test_type):
+    if test_type == "Unbal":
+        return 0
+    if test_type == "Bal":
+        return 1
+    return 2
 
 
 def main():
@@ -151,8 +161,13 @@ def main():
 
     rows = []
 
-    for npz_path in sorted(root.rglob(args.pattern)):
+    npz_files = []
+    npz_files.extend(root.rglob("roc_test.npz"))
+    npz_files.extend(root.rglob("roc_test_balanced.npz"))
+
+    for npz_path in sorted(npz_files):
         freq, model = infer_freq_model(npz_path, root)
+        test_type = infer_test_type(npz_path)
 
         data = np.load(npz_path)
 
@@ -165,7 +180,6 @@ def main():
         y_true = data["y_true"].astype(int).ravel()
         y_prob = data["y_score"].astype(float).ravel()
 
-        # Convert probability into binary class prediction.
         y_pred = (y_prob >= args.threshold).astype(int)
 
         auroc = roc_auc_score(y_true, y_prob)
@@ -183,6 +197,7 @@ def main():
         rows.append([
             freq,
             model,
+            test_type,
             auroc,
             sensitivity,
             ece,
@@ -192,25 +207,26 @@ def main():
         ])
 
     if not rows:
-        message = f"No files matching '{args.pattern}' found under: {root}"
+        message = f"No roc_test.npz or roc_test_balanced.npz files found under: {root}"
         if args.strict:
             raise FileNotFoundError(message)
         print(message)
 
-    rows.sort(key=lambda x: (x[1], freq_as_int(x[0])))
+    rows.sort(key=lambda x: (x[1], freq_as_int(x[0]), test_type_order(x[2])))
 
     print("\nFINAL TEST METRICS")
-    print("=" * 115)
+    print("=" * 130)
     print(
         f"{'Model':<12}"
         f"{'Freq':<8}"
+        f"{'Test':<8}"
         f"{'AUROC':<12}"
         f"{'Sensitivity':<14}"
         f"{'ECE':<12}"
         f"{'MeanP(AF)':<14}"
         f"{'Prevalence':<12}"
     )
-    print("-" * 115)
+    print("-" * 130)
 
     d = args.decimals
 
@@ -218,11 +234,12 @@ def main():
         print(
             f"{r[1]:<12}"
             f"{r[0]:<8}"
-            f"{r[2]:<12.{d}f}"
-            f"{r[3]:<14.{d}f}"
-            f"{r[4]:<12.{d}f}"
-            f"{r[5]:<14.{d}f}"
-            f"{r[6]:<12.{d}f}"
+            f"{r[2]:<8}"
+            f"{r[3]:<12.{d}f}"
+            f"{r[4]:<14.{d}f}"
+            f"{r[5]:<12.{d}f}"
+            f"{r[6]:<14.{d}f}"
+            f"{r[7]:<12.{d}f}"
         )
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -232,6 +249,7 @@ def main():
         writer.writerow([
             "Frequency",
             "Model",
+            "TestType",
             "AUROC",
             "Sensitivity",
             "ECE",
