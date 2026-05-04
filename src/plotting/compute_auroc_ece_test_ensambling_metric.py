@@ -1,49 +1,182 @@
 #!/usr/bin/env python3
 from pathlib import Path
-import numpy as np
-from sklearn.metrics import roc_auc_score
+import argparse
 import csv
 
-ROOT = Path("checkpoints/ptbl-xl")
+import numpy as np
+from sklearn.metrics import roc_auc_score, recall_score
 
 
-# ================= ECE (positive-class) =================
 def compute_ece_posclass(y_true, y_prob, n_bins=10):
+    """
+    Positive-class Expected Calibration Error.
+
+    Compares predicted AF probability with the observed AF prevalence
+    inside fixed probability bins.
+    """
+
+    y_true = np.asarray(y_true).astype(int).ravel()
+    y_prob = np.asarray(y_prob).astype(float).ravel()
+
+    if len(y_true) == 0:
+        raise ValueError("y_true is empty.")
+
+    if len(y_true) != len(y_prob):
+        raise ValueError(
+            f"Length mismatch: y_true has {len(y_true)} values, "
+            f"but y_prob has {len(y_prob)} values."
+        )
+
     bins = np.linspace(0.0, 1.0, n_bins + 1)
     binids = np.clip(np.digitize(y_prob, bins) - 1, 0, n_bins - 1)
 
     ece = 0.0
-    N = len(y_true)
+    n = len(y_true)
 
     for b in range(n_bins):
-        m = binids == b
-        if np.any(m):
-            frac_pos = y_true[m].mean()
-            conf = y_prob[m].mean()
-            ece += (m.sum() / N) * abs(frac_pos - conf)
+        mask = binids == b
+
+        if np.any(mask):
+            frac_pos = y_true[mask].mean()
+            conf = y_prob[mask].mean()
+            ece += (mask.sum() / n) * abs(frac_pos - conf)
 
     return float(ece)
 
 
-# ================= MAIN =================
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compute final test AUROC, sensitivity, and positive-class ECE "
+            "from roc_test.npz files."
+        )
+    )
+
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path("checkpoints/ptbl-xl"),
+        help="Root checkpoint directory. Default: checkpoints/ptbl-xl",
+    )
+
+    parser.add_argument(
+        "--pattern",
+        type=str,
+        default="roc_test.npz",
+        help="NPZ filename to search for. Default: roc_test.npz",
+    )
+
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Output CSV file or folder. Default: <root>/test_metrics_summary.csv",
+    )
+
+    parser.add_argument(
+        "--bins",
+        type=int,
+        default=10,
+        help="Number of bins for ECE. Default: 10",
+    )
+
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help="Decision threshold used for sensitivity. Default: 0.5",
+    )
+
+    parser.add_argument(
+        "--decimals",
+        type=int,
+        default=4,
+        help="Number of decimals printed in terminal. Default: 4",
+    )
+
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Raise an error if no roc_test.npz files are found.",
+    )
+
+    return parser.parse_args()
+
+
+def infer_freq_model(npz_path, root):
+    """
+    Expected path:
+        root / <freq> / <model> / roc_test.npz
+
+    Example:
+        checkpoints/ptbl-xl/250hz/cnn_lstm/roc_test.npz
+    """
+
+    rel = npz_path.relative_to(root)
+    parts = rel.parts
+
+    if len(parts) >= 3:
+        freq = parts[0]
+        model = parts[1]
+    else:
+        freq = "unknown"
+        model = npz_path.parent.name
+
+    return freq, model
+
+
+def freq_as_int(freq):
+    try:
+        return int(str(freq).replace("hz", "").replace("Hz", ""))
+    except ValueError:
+        return 999999
+
+
 def main():
+    args = parse_args()
+
+    root = args.root
+
+    if args.out is None:
+        out_csv = root / "test_metrics_summary.csv"
+    else:
+        out_csv = args.out
+
+    # Allow --out to be either a folder or a CSV file.
+    if out_csv.suffix.lower() != ".csv":
+        out_csv = out_csv / "test_metrics_summary.csv"
+
+    if not root.exists():
+        raise FileNotFoundError(f"Checkpoint root not found: {root}")
 
     rows = []
 
-    # find all roc_test.npz files from checkpoints/ptbl-xl and compute metrics
-    # and store in rows as: [freq, model, auroc, ece, mean_prob, prevalence]
-    for npz_path in sorted(ROOT.rglob("roc_test.npz")):
-
-        model_dir = npz_path.parent
-        model = model_dir.name              # cnn1d / cnn_lstm
-        freq = model_dir.parent.name        # 62hz / 100hz ...
+    for npz_path in sorted(root.rglob(args.pattern)):
+        freq, model = infer_freq_model(npz_path, root)
 
         data = np.load(npz_path)
-        y_true = data["y_true"]
-        y_prob = data["y_score"]
+
+        if "y_true" not in data or "y_score" not in data:
+            raise KeyError(
+                f"{npz_path} must contain arrays named 'y_true' and 'y_score'. "
+                f"Found: {list(data.keys())}"
+            )
+
+        y_true = data["y_true"].astype(int).ravel()
+        y_prob = data["y_score"].astype(float).ravel()
+
+        # Convert probability into binary class prediction.
+        y_pred = (y_prob >= args.threshold).astype(int)
 
         auroc = roc_auc_score(y_true, y_prob)
-        ece = compute_ece_posclass(y_true, y_prob)
+        sensitivity = recall_score(y_true, y_pred)
+
+        ece = compute_ece_posclass(
+            y_true=y_true,
+            y_prob=y_prob,
+            n_bins=args.bins,
+        )
+
         mean_prob = float(y_prob.mean())
         prevalence = float(y_true.mean())
 
@@ -51,40 +184,64 @@ def main():
             freq,
             model,
             auroc,
+            sensitivity,
             ece,
             mean_prob,
-            prevalence
+            prevalence,
+            str(npz_path),
         ])
 
-    # sort nicely
-    rows.sort(key=lambda x: (x[1], int(x[0].replace("hz",""))))
+    if not rows:
+        message = f"No files matching '{args.pattern}' found under: {root}"
+        if args.strict:
+            raise FileNotFoundError(message)
+        print(message)
 
-    # -------- PRINT TABLE --------
+    rows.sort(key=lambda x: (x[1], freq_as_int(x[0])))
+
     print("\nFINAL TEST METRICS")
-    print("="*80)
-    print(f"{'Model':<10}{'Freq':<8}{'AUROC':<10}{'ECE':<10}"
-          f"{'MeanP(AF)':<14}{'Prevalence':<12}")
-    print("-"*80)
+    print("=" * 115)
+    print(
+        f"{'Model':<12}"
+        f"{'Freq':<8}"
+        f"{'AUROC':<12}"
+        f"{'Sensitivity':<14}"
+        f"{'ECE':<12}"
+        f"{'MeanP(AF)':<14}"
+        f"{'Prevalence':<12}"
+    )
+    print("-" * 115)
+
+    d = args.decimals
 
     for r in rows:
-        print(f"{r[1]:<10}{r[0]:<8}{r[2]:<10.4f}{r[3]:<10.4f}"
-              f"{r[4]:<14.4f}{r[5]:<12.4f}")
+        print(
+            f"{r[1]:<12}"
+            f"{r[0]:<8}"
+            f"{r[2]:<12.{d}f}"
+            f"{r[3]:<14.{d}f}"
+            f"{r[4]:<12.{d}f}"
+            f"{r[5]:<14.{d}f}"
+            f"{r[6]:<12.{d}f}"
+        )
 
-    # -------- SAVE CSV --------
-    out_csv = ROOT / "test_metrics_summary.csv"
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+
     with open(out_csv, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
             "Frequency",
             "Model",
             "AUROC",
+            "Sensitivity",
             "ECE",
             "MeanPredictedAF",
-            "TruePrevalence"
+            "TruePrevalence",
+            "SourceFile",
         ])
         writer.writerows(rows)
 
-    print("\nSaved:", out_csv)
+    print(f"\nSaved: {out_csv}")
 
 
 if __name__ == "__main__":
