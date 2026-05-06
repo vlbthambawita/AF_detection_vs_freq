@@ -335,7 +335,26 @@ class ModelFactory:
         if model_name == "cnn_lstm":
             return CNN_LSTM_ECG(in_channels=in_channels, num_classes=num_classes)
         raise ValueError(f"Unsupported model '{model_name}'.")
+    
 
+def resolve_torch_device(device: str | None) -> torch.device:
+    """Resolve GUI/CLI device values into a valid torch.device."""
+
+    if device is None or device == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if device == "cuda":
+        if not torch.cuda.is_available():
+            print("[WARNING] CUDA was selected, but CUDA is not available. Falling back to CPU.")
+            return torch.device("cpu")
+        return torch.device("cuda")
+
+    if device == "cpu":
+        return torch.device("cpu")
+
+    raise ValueError(
+        f"Unsupported device '{device}'. Use one of: auto, cuda, cpu."
+    )
 
 class EnsemblePredictor:
     """Load best-fold checkpoints and reproduce ensemble test-time prediction."""
@@ -357,7 +376,7 @@ class EnsemblePredictor:
         self.in_channels = in_channels
         self.num_classes = num_classes
         self.folds = folds
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.device = resolve_torch_device(device)
         self.checkpoint_root = checkpoint_root or resolve_checkpoints_root()
         self.models = self._load_models()
 

@@ -692,7 +692,7 @@ class PipelineGUI(tk.Tk):
         if len(rates) != 1:
             messagebox.showwarning("Choose one frequency", "LIME needs exactly one sampling frequency.")
             return
-        script = self._find_script(["explain_lime.py", "src/explain_lime.py"])
+        script = self._find_script(["explain_lime.py", "explainable/explain_lime.py"])
         if not script:
             return
         rate = rates[0]

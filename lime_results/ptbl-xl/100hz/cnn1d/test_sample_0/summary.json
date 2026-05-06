@@ -1,0 +1,268 @@
+{
+  "dataset": "ptbl-xl",
+  "sampling_rate_hz": 100,
+  "model": "cnn1d",
+  "split": "test",
+  "sample_index": 0,
+  "true_label": "NORMAL",
+  "predicted_label": "NORMAL",
+  "explained_class": "NORMAL",
+  "class_probabilities": {
+    "NORMAL": 0.9998493194580078,
+    "AFIB": 0.00015063819591887295
+  },
+  "window_size_sec": 0.5,
+  "window_size_samples": 50,
+  "num_time_windows": 20,
+  "num_interpretable_features": 240,
+  "num_perturbations": 512,
+  "mask_strategy": "local_mean",
+  "kernel_width": 0.25,
+  "ridge_alpha": 1.0,
+  "seed": 42,
+  "surrogate_diagnostics": {
+    "intercept": 0.9974518418312073,
+    "weighted_r2": 0.7219420710900807,
+    "weighted_mse": 1.0092805293169014e-08,
+    "original_target_score": 0.9998493194580078,
+    "original_surrogate_score": 0.9999813027393394
+  },
+  "top_positive_windows": [
+    {
+      "feature_index": 3,
+      "lead_index": 0,
+      "lead_name": "I",
+      "window_index": 3,
+      "start_sec": 1.5,
+      "end_sec": 2.0,
+      "display_name": "Lead I | 1.5s-2.0s",
+      "surrogate_weight": 5.925757432123646e-05,
+      "absolute_weight": 5.925757432123646e-05
+    },
+    {
+      "feature_index": 61,
+      "lead_index": 3,
+      "lead_name": "aVR",
+      "window_index": 1,
+      "start_sec": 0.5,
+      "end_sec": 1.0,
+      "display_name": "Lead aVR | 0.5s-1.0s",
+      "surrogate_weight": 5.3439667681232095e-05,
+      "absolute_weight": 5.3439667681232095e-05
+    },
+    {
+      "feature_index": 7,
+      "lead_index": 0,
+      "lead_name": "I",
+      "window_index": 7,
+      "start_sec": 3.5,
+      "end_sec": 4.0,
+      "display_name": "Lead I | 3.5s-4.0s",
+      "surrogate_weight": 5.076210436527617e-05,
+      "absolute_weight": 5.076210436527617e-05
+    },
+    {
+      "feature_index": 1,
+      "lead_index": 0,
+      "lead_name": "I",
+      "window_index": 1,
+      "start_sec": 0.5,
+      "end_sec": 1.0,
+      "display_name": "Lead I | 0.5s-1.0s",
+      "surrogate_weight": 4.550747325993143e-05,
+      "absolute_weight": 4.550747325993143e-05
+    },
+    {
+      "feature_index": 67,
+      "lead_index": 3,
+      "lead_name": "aVR",
+      "window_index": 7,
+      "start_sec": 3.5,
+      "end_sec": 4.0,
+      "display_name": "Lead aVR | 3.5s-4.0s",
+      "surrogate_weight": 4.538255598163232e-05,
+      "absolute_weight": 4.538255598163232e-05
+    },
+    {
+      "feature_index": 21,
+      "lead_index": 1,
+      "lead_name": "II",
+      "window_index": 1,
+      "start_sec": 0.5,
+      "end_sec": 1.0,
+      "display_name": "Lead II | 0.5s-1.0s",
+      "surrogate_weight": 4.5055880036670715e-05,
+      "absolute_weight": 4.5055880036670715e-05
+    },
+    {
+      "feature_index": 33,
+      "lead_index": 1,
+      "lead_name": "II",
+      "window_index": 13,
+      "start_sec": 6.5,
+      "end_sec": 7.0,
+      "display_name": "Lead II | 6.5s-7.0s",
+      "surrogate_weight": 4.4444412196753547e-05,
+      "absolute_weight": 4.4444412196753547e-05
+    },
+    {
+      "feature_index": 5,
+      "lead_index": 0,
+      "lead_name": "I",
+      "window_index": 5,
+      "start_sec": 2.5,
+      "end_sec": 3.0,
+      "display_name": "Lead I | 2.5s-3.0s",
+      "surrogate_weight": 4.3893644033232704e-05,
+      "absolute_weight": 4.3893644033232704e-05
+    },
+    {
+      "feature_index": 144,
+      "lead_index": 7,
+      "lead_name": "V2",
+      "window_index": 4,
+      "start_sec": 2.0,
+      "end_sec": 2.5,
+      "display_name": "Lead V2 | 2.0s-2.5s",
+      "surrogate_weight": 4.0632094169268385e-05,
+      "absolute_weight": 4.0632094169268385e-05
+    },
+    {
+      "feature_index": 73,
+      "lead_index": 3,
+      "lead_name": "aVR",
+      "window_index": 13,
+      "start_sec": 6.5,
+      "end_sec": 7.0,
+      "display_name": "Lead aVR | 6.5s-7.0s",
+      "surrogate_weight": 4.0157337934942916e-05,
+      "absolute_weight": 4.0157337934942916e-05
+    }
+  ],
+  "top_negative_windows": [
+    {
+      "feature_index": 176,
+      "lead_index": 8,
+      "lead_name": "V3",
+      "window_index": 16,
+      "start_sec": 8.0,
+      "end_sec": 8.5,
+      "display_name": "Lead V3 | 8.0s-8.5s",
+      "surrogate_weight": -2.6189909476670437e-05,
+      "absolute_weight": 2.6189909476670437e-05
+    },
+    {
+      "feature_index": 41,
+      "lead_index": 2,
+      "lead_name": "III",
+      "window_index": 1,
+      "start_sec": 0.5,
+      "end_sec": 1.0,
+      "display_name": "Lead III | 0.5s-1.0s",
+      "surrogate_weight": -2.08509973163018e-05,
+      "absolute_weight": 2.08509973163018e-05
+    },
+    {
+      "feature_index": 47,
+      "lead_index": 2,
+      "lead_name": "III",
+      "window_index": 7,
+      "start_sec": 3.5,
+      "end_sec": 4.0,
+      "display_name": "Lead III | 3.5s-4.0s",
+      "surrogate_weight": -1.8382179405307397e-05,
+      "absolute_weight": 1.8382179405307397e-05
+    },
+    {
+      "feature_index": 48,
+      "lead_index": 2,
+      "lead_name": "III",
+      "window_index": 8,
+      "start_sec": 4.0,
+      "end_sec": 4.5,
+      "display_name": "Lead III | 4.0s-4.5s",
+      "surrogate_weight": -1.6091047655208968e-05,
+      "absolute_weight": 1.6091047655208968e-05
+    },
+    {
+      "feature_index": 108,
+      "lead_index": 5,
+      "lead_name": "aVF",
+      "window_index": 8,
+      "start_sec": 4.0,
+      "end_sec": 4.5,
+      "display_name": "Lead aVF | 4.0s-4.5s",
+      "surrogate_weight": -1.4931981240806635e-05,
+      "absolute_weight": 1.4931981240806635e-05
+    },
+    {
+      "feature_index": 221,
+      "lead_index": 11,
+      "lead_name": "V6",
+      "window_index": 1,
+      "start_sec": 0.5,
+      "end_sec": 1.0,
+      "display_name": "Lead V6 | 0.5s-1.0s",
+      "surrogate_weight": -1.4650123375758994e-05,
+      "absolute_weight": 1.4650123375758994e-05
+    },
+    {
+      "feature_index": 189,
+      "lead_index": 9,
+      "lead_name": "V4",
+      "window_index": 9,
+      "start_sec": 4.5,
+      "end_sec": 5.0,
+      "display_name": "Lead V4 | 4.5s-5.0s",
+      "surrogate_weight": -1.4486150575976353e-05,
+      "absolute_weight": 1.4486150575976353e-05
+    },
+    {
+      "feature_index": 101,
+      "lead_index": 5,
+      "lead_name": "aVF",
+      "window_index": 1,
+      "start_sec": 0.5,
+      "end_sec": 1.0,
+      "display_name": "Lead aVF | 0.5s-1.0s",
+      "surrogate_weight": -1.4475738680630457e-05,
+      "absolute_weight": 1.4475738680630457e-05
+    },
+    {
+      "feature_index": 219,
+      "lead_index": 10,
+      "lead_name": "V5",
+      "window_index": 19,
+      "start_sec": 9.5,
+      "end_sec": 10.0,
+      "display_name": "Lead V5 | 9.5s-10.0s",
+      "surrogate_weight": -1.2541898286144715e-05,
+      "absolute_weight": 1.2541898286144715e-05
+    },
+    {
+      "feature_index": 145,
+      "lead_index": 7,
+      "lead_name": "V2",
+      "window_index": 5,
+      "start_sec": 2.5,
+      "end_sec": 3.0,
+      "display_name": "Lead V2 | 2.5s-3.0s",
+      "surrogate_weight": -1.2184254956082441e-05,
+      "absolute_weight": 1.2184254956082441e-05
+    }
+  ],
+  "selection_context": null,
+  "method_notes": [
+    "LIME is a local approximation around one ECG sample, not a proof of exact model reasoning.",
+    "The interpretable units are lead-time windows in input space, so this complements gradient-based Grad-CAM.",
+    "Masking ECG windows can create unrealistic physiological patterns, especially with aggressive perturbations.",
+    "Deep models may rely on distributed or abstract features rather than only textbook-visible ECG markers.",
+    "Disagreement between LIME and Grad-CAM is possible because they answer different explanation questions."
+  ],
+  "files": {
+    "feature_weights_csv": "C:\\Users\\arjan\\Documents\\GitHub\\SEARCH_AF_detection_OsloMet_BachelorGroup\\lime_results\\ptbl-xl\\100hz\\cnn1d\\test_sample_0\\feature_weights.csv",
+    "leadwise_windows_plot": "C:\\Users\\arjan\\Documents\\GitHub\\SEARCH_AF_detection_OsloMet_BachelorGroup\\lime_results\\ptbl-xl\\100hz\\cnn1d\\test_sample_0\\leadwise_windows.png",
+    "importance_heatmap": "C:\\Users\\arjan\\Documents\\GitHub\\SEARCH_AF_detection_OsloMet_BachelorGroup\\lime_results\\ptbl-xl\\100hz\\cnn1d\\test_sample_0\\importance_heatmap.png",
+    "top_windows_barplot": "C:\\Users\\arjan\\Documents\\GitHub\\SEARCH_AF_detection_OsloMet_BachelorGroup\\lime_results\\ptbl-xl\\100hz\\cnn1d\\test_sample_0\\top_windows_barplot.png"
+  }
+}
