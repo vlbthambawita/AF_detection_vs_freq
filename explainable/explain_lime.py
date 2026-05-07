@@ -1,4 +1,5 @@
-"""LIME-style post-hoc explanations for ECG AFIB vs NORMAL classifiers.
+"""
+LIME-style post-hoc explanations for ECG AFIB vs NORMAL classifiers.
 
 This module complements Grad-CAM rather than replacing it:
 
@@ -26,6 +27,7 @@ from typing import Any, Literal, Sequence
 
 import numpy as np
 import torch
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -120,7 +122,10 @@ def set_deterministic_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
@@ -134,102 +139,123 @@ def parse_args() -> argparse.Namespace:
             "(AFIB vs NORMAL)."
         )
     )
+
     parser.add_argument(
         "--data_path",
         required=True,
         help=(
-            "Path to a prepared data frequency folder such as "
+            "Path to a prepared data frequency folder, for example "
             "prepared_data/ptb-xl/100hz."
         ),
     )
+
     parser.add_argument(
         "--model",
         required=True,
         choices=["cnn1d", "cnn_lstm"],
         help="Trained architecture to explain.",
     )
+
     parser.add_argument(
         "--sample_idx",
         type=int,
         default=None,
-        help="Sample index inside the selected split. Required unless representative selection is used.",
+        help=(
+            "Sample index inside the selected split. "
+            "Required unless --representative_case is used."
+        ),
     )
+
     parser.add_argument(
         "--split",
         choices=["test", "all"],
         default="test",
         help="'test' loads <data_path>/test/test.pt, 'all' loads <data_path>/data.pt.",
     )
+
     parser.add_argument(
         "--folds",
         type=int,
         default=5,
         help="Number of best-fold checkpoints to ensemble.",
     )
+
     parser.add_argument(
         "--device",
-        default=None,
-        help="Torch device, for example 'cpu' or 'cuda'. Defaults to cuda when available.",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="Torch device. 'auto' uses CUDA if available, otherwise CPU.",
     )
+
     parser.add_argument(
         "--output_dir",
         default=None,
         help="Optional custom output directory. Defaults to project_root/lime_results/...",
     )
+
     parser.add_argument(
         "--window_sec",
         type=float,
         default=0.5,
         help="Interpretable ECG window size in seconds.",
     )
+
     parser.add_argument(
         "--num_perturbations",
         type=int,
         default=1024,
         help="Number of perturbed neighborhood samples for the local surrogate.",
     )
+
     parser.add_argument(
         "--top_k",
         type=int,
         default=10,
         help="Number of strongest positive and negative windows to highlight.",
     )
+
     parser.add_argument(
         "--explain_class",
         choices=["pred", "true"],
         default="pred",
         help="Explain the predicted class or the ground-truth class.",
     )
+
     parser.add_argument(
         "--seed",
         type=int,
         default=42,
         help="Random seed for deterministic perturbation generation.",
     )
+
     parser.add_argument(
         "--mask_strategy",
         choices=["zero", "lead_mean", "local_mean"],
         default="local_mean",
         help="How masked lead-time windows are replaced during perturbation.",
     )
+
     parser.add_argument(
         "--ridge_alpha",
         type=float,
         default=1.0,
         help="Ridge regularization strength for the weighted local surrogate.",
     )
+
     parser.add_argument(
         "--kernel_width",
         type=float,
         default=0.25,
         help="Kernel width for the locality weighting function on normalized Hamming distance.",
     )
+
     parser.add_argument(
         "--batch_size",
         type=int,
         default=64,
         help="Batch size for running perturbed samples through the ensemble.",
     )
+
     parser.add_argument(
         "--representative_case",
         choices=[
@@ -242,6 +268,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Automatically choose a representative sample from the selected split.",
     )
+
+    parser.add_argument(
+        "--uncertainty_margin",
+        type=float,
+        default=0.10,
+        help=(
+            "Margin around P(AFIB)=0.5 used to mark a selected sample as uncertain. "
+            "Default 0.10 means P(AFIB) in [0.40, 0.60] is marked uncertain."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -249,7 +286,7 @@ def resolve_existing_path(raw_path: str | Path) -> Path:
     """Resolve a path against likely project roots and ensure it exists."""
 
     path = Path(raw_path).expanduser()
-    candidates = []
+    candidates: list[Path] = []
 
     if path.is_absolute():
         candidates.append(path)
@@ -280,9 +317,11 @@ def resolve_checkpoints_root() -> Path:
         PROJECT_ROOT / "checkpoints",
         SRC_ROOT / "checkpoints",
     ]
+
     for candidate in candidates:
         if candidate.exists():
             return candidate
+
     return PROJECT_ROOT / "checkpoints"
 
 
@@ -290,23 +329,93 @@ def resolve_output_path(raw_path: str | Path) -> Path:
     """Resolve an output path relative to the project root when needed."""
 
     path = Path(raw_path).expanduser()
+
     if path.is_absolute():
         return path.resolve()
+
     return (PROJECT_ROOT / path).resolve()
+
+
+def resolve_torch_device(device: str | None) -> torch.device:
+    """Resolve GUI/CLI device values into a valid torch.device."""
+
+    if device is None or device == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if device == "cuda":
+        if not torch.cuda.is_available():
+            print(
+                "[WARNING] CUDA was selected, but CUDA is not available. "
+                "Falling back to CPU."
+            )
+            return torch.device("cpu")
+
+        return torch.device("cuda")
+
+    if device == "cpu":
+        return torch.device("cpu")
+
+    raise ValueError(f"Unsupported device '{device}'. Use one of: auto, cuda, cpu.")
 
 
 def parse_sampling_rate(fs_dir_name: str) -> int:
     """Extract an integer sampling rate from a directory name such as '100hz'."""
 
     digits = "".join(character for character in fs_dir_name if character.isdigit())
+
     if not digits:
         raise ValueError(
             f"Could not parse sampling rate from directory name '{fs_dir_name}'."
         )
+
     return int(digits)
 
 
-def load_split_tensor(data_dir: Path, split: Literal["test", "all"]) -> tuple[torch.Tensor, torch.Tensor]:
+def classify_prediction_case(true_class: int, predicted_class: int) -> str:
+    """Classify one prediction into a representative-case category."""
+
+    if true_class == 1 and predicted_class == 1:
+        return "correct_afib"
+
+    if true_class == 0 and predicted_class == 0:
+        return "correct_normal"
+
+    if true_class == 0 and predicted_class == 1:
+        return "false_positive"
+
+    if true_class == 1 and predicted_class == 0:
+        return "false_negative"
+
+    return "unknown"
+
+
+def classify_uncertainty(probabilities: np.ndarray, margin: float = 0.10) -> str:
+    """Classify whether the prediction is uncertain based on P(AFIB)."""
+
+    p_afib = float(probabilities[1])
+
+    if abs(p_afib - 0.5) <= margin:
+        return "uncertain"
+
+    return "confident"
+
+
+def format_selection_mode(
+    representative_case: str | None,
+    sample_index: int,
+) -> str:
+    """Return a readable selection description for plots and summaries."""
+
+    if representative_case:
+        return f"selected_by={representative_case}, sample_idx={sample_index}"
+
+    return f"selected_by=manual, sample_idx={sample_index}"
+
+
+def load_split_tensor(
+    data_dir: Path,
+    split: Literal["test", "all"],
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Load a prepared ECG tensor split from disk."""
 
     if split == "test":
@@ -318,8 +427,10 @@ def load_split_tensor(data_dir: Path, split: Literal["test", "all"]) -> tuple[to
         raise FileNotFoundError(f"Missing prepared tensor file: {tensor_path}")
 
     data = torch.load(tensor_path, map_location="cpu")
+
     if "X" not in data or "y" not in data:
         raise KeyError(f"Expected 'X' and 'y' keys in {tensor_path}")
+
     return data["X"], data["y"]
 
 
@@ -327,34 +438,24 @@ class ModelFactory:
     """Construct supported ECG model architectures without changing training logic."""
 
     @staticmethod
-    def build(model_name: str, in_channels: int, num_classes: int) -> torch.nn.Module:
+    def build(
+        model_name: str,
+        in_channels: int,
+        num_classes: int,
+    ) -> torch.nn.Module:
         """Instantiate one supported architecture."""
 
         if model_name == "cnn1d":
             return CNN1D(in_channels=in_channels, num_classes=num_classes)
+
         if model_name == "cnn_lstm":
-            return CNN_LSTM_ECG(in_channels=in_channels, num_classes=num_classes)
+            return CNN_LSTM_ECG(
+                in_channels=in_channels,
+                num_classes=num_classes,
+            )
+
         raise ValueError(f"Unsupported model '{model_name}'.")
-    
 
-def resolve_torch_device(device: str | None) -> torch.device:
-    """Resolve GUI/CLI device values into a valid torch.device."""
-
-    if device is None or device == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    if device == "cuda":
-        if not torch.cuda.is_available():
-            print("[WARNING] CUDA was selected, but CUDA is not available. Falling back to CPU.")
-            return torch.device("cpu")
-        return torch.device("cuda")
-
-    if device == "cpu":
-        return torch.device("cpu")
-
-    raise ValueError(
-        f"Unsupported device '{device}'. Use one of: auto, cuda, cpu."
-    )
 
 class EnsemblePredictor:
     """Load best-fold checkpoints and reproduce ensemble test-time prediction."""
@@ -396,8 +497,10 @@ class EnsemblePredictor:
         """Load all requested fold checkpoints for ensemble inference."""
 
         models: list[torch.nn.Module] = []
+
         for fold in range(1, self.folds + 1):
             checkpoint_path = self._fold_checkpoint_path(fold)
+
             if not checkpoint_path.exists():
                 raise FileNotFoundError(f"Missing checkpoint: {checkpoint_path}")
 
@@ -406,15 +509,21 @@ class EnsemblePredictor:
                 in_channels=self.in_channels,
                 num_classes=self.num_classes,
             )
+
             state_dict = torch.load(checkpoint_path, map_location=self.device)
             model.load_state_dict(state_dict)
             model.to(self.device)
             model.eval()
             models.append(model)
+
         return models
 
     @torch.inference_mode()
-    def predict_logits(self, batch: torch.Tensor, batch_size: int = 64) -> torch.Tensor:
+    def predict_logits(
+        self,
+        batch: torch.Tensor,
+        batch_size: int = 64,
+    ) -> torch.Tensor:
         """Predict averaged ensemble logits for a batch of ECG samples."""
 
         if batch.ndim != 3:
@@ -423,11 +532,13 @@ class EnsemblePredictor:
             )
 
         outputs: list[torch.Tensor] = []
+
         for start in range(0, batch.shape[0], batch_size):
             end = start + batch_size
             batch_chunk = batch[start:end].to(self.device).float()
 
             logits_sum: torch.Tensor | None = None
+
             for model in self.models:
                 logits = model(batch_chunk)
                 logits_sum = logits if logits_sum is None else logits_sum + logits
@@ -438,7 +549,11 @@ class EnsemblePredictor:
         return torch.cat(outputs, dim=0)
 
     @torch.inference_mode()
-    def predict_probabilities(self, batch: torch.Tensor, batch_size: int = 64) -> torch.Tensor:
+    def predict_probabilities(
+        self,
+        batch: torch.Tensor,
+        batch_size: int = 64,
+    ) -> torch.Tensor:
         """Predict ensemble probabilities after averaging logits across folds."""
 
         logits = self.predict_logits(batch=batch, batch_size=batch_size)
@@ -450,6 +565,7 @@ class EnsemblePredictor:
         logits = self.predict_logits(sample, batch_size=1).squeeze(0).numpy()
         probabilities = torch.softmax(torch.from_numpy(logits), dim=0).numpy()
         predicted_class = int(np.argmax(probabilities))
+
         return PredictionResult(
             logits=logits,
             probabilities=probabilities,
@@ -460,7 +576,11 @@ class EnsemblePredictor:
 class RepresentativeSampleSelector:
     """Select practical example cases from one split for later explanation."""
 
-    def __init__(self, predictor: EnsemblePredictor, batch_size: int = 64) -> None:
+    def __init__(
+        self,
+        predictor: EnsemblePredictor,
+        batch_size: int = 64,
+    ) -> None:
         self.predictor = predictor
         self.batch_size = batch_size
 
@@ -472,7 +592,11 @@ class RepresentativeSampleSelector:
     ) -> tuple[int, dict[str, Any]]:
         """Select one representative sample index for a requested test-set case."""
 
-        probabilities = self.predictor.predict_probabilities(X.float(), batch_size=self.batch_size)
+        probabilities = self.predictor.predict_probabilities(
+            X.float(),
+            batch_size=self.batch_size,
+        )
+
         probabilities_np = probabilities.numpy()
         pred = probabilities_np.argmax(axis=1)
         p_afib = probabilities_np[:, 1]
@@ -481,18 +605,23 @@ class RepresentativeSampleSelector:
         if case == "correct_afib":
             candidates = np.where((y_np == 1) & (pred == 1))[0]
             ranking = np.argsort(-p_afib[candidates])
+
         elif case == "correct_normal":
             candidates = np.where((y_np == 0) & (pred == 0))[0]
             ranking = np.argsort(p_afib[candidates])
+
         elif case == "false_positive":
             candidates = np.where((y_np == 0) & (pred == 1))[0]
             ranking = np.argsort(-p_afib[candidates])
+
         elif case == "false_negative":
             candidates = np.where((y_np == 1) & (pred == 0))[0]
             ranking = np.argsort(p_afib[candidates])
+
         elif case == "uncertain":
             candidates = np.arange(len(y_np))
             ranking = np.argsort(np.abs(p_afib[candidates] - 0.5))
+
         else:
             raise ValueError(f"Unsupported representative case '{case}'.")
 
@@ -500,11 +629,18 @@ class RepresentativeSampleSelector:
             raise ValueError(f"No samples found for representative case '{case}'.")
 
         selected_idx = int(candidates[ranking[0]])
+
         return selected_idx, {
             "representative_case": case,
+            "selected_sample_index": selected_idx,
             "selected_probability_afib": float(p_afib[selected_idx]),
+            "selected_probability_normal": float(probabilities_np[selected_idx, 0]),
             "selected_true_label": LABEL_MAP[int(y_np[selected_idx])],
             "selected_predicted_label": LABEL_MAP[int(pred[selected_idx])],
+            "selected_prediction_case": classify_prediction_case(
+                true_class=int(y_np[selected_idx]),
+                predicted_class=int(pred[selected_idx]),
+            ),
         }
 
 
@@ -536,6 +672,7 @@ class ECGWindowInterpreter:
 
         if self.num_channels == 12:
             return STANDARD_12_LEAD_NAMES.copy()
+
         return [f"Lead_{index}" for index in range(self.num_channels)]
 
     def _build_features(self) -> list[FeatureWindow]:
@@ -543,14 +680,22 @@ class ECGWindowInterpreter:
 
         features: list[FeatureWindow] = []
         feature_index = 0
+
         for lead_index in range(self.num_channels):
             lead_name = self.lead_names[lead_index]
-            lead_label = lead_name if lead_name.startswith("Lead_") else f"Lead {lead_name}"
+            lead_label = (
+                lead_name if lead_name.startswith("Lead_") else f"Lead {lead_name}"
+            )
+
             for window_index in range(self.num_time_windows):
                 start_sample = window_index * self.window_size_samples
-                end_sample = min(self.time_length, start_sample + self.window_size_samples)
+                end_sample = min(
+                    self.time_length,
+                    start_sample + self.window_size_samples,
+                )
                 start_sec = start_sample / self.sampling_rate_hz
                 end_sec = end_sample / self.sampling_rate_hz
+
                 features.append(
                     FeatureWindow(
                         feature_index=feature_index,
@@ -564,7 +709,9 @@ class ECGWindowInterpreter:
                         display_name=f"{lead_label} | {start_sec:.1f}s-{end_sec:.1f}s",
                     )
                 )
+
                 feature_index += 1
+
         return features
 
     @property
@@ -573,12 +720,17 @@ class ECGWindowInterpreter:
 
         return len(self.features)
 
-    def build_feature_rows(self, feature_weights: np.ndarray) -> list[dict[str, Any]]:
+    def build_feature_rows(
+        self,
+        feature_weights: np.ndarray,
+    ) -> list[dict[str, Any]]:
         """Combine feature metadata with surrogate coefficients."""
 
         rows: list[dict[str, Any]] = []
+
         for feature in self.features:
             weight = float(feature_weights[feature.feature_index])
+
             rows.append(
                 {
                     "feature_index": feature.feature_index,
@@ -592,14 +744,22 @@ class ECGWindowInterpreter:
                     "absolute_weight": abs(weight),
                 }
             )
+
         return rows
 
     def feature_weight_matrix(self, feature_weights: np.ndarray) -> np.ndarray:
         """Reshape 1D feature weights into a lead x time-window matrix."""
 
-        matrix = np.zeros((self.num_channels, self.num_time_windows), dtype=np.float64)
+        matrix = np.zeros(
+            (self.num_channels, self.num_time_windows),
+            dtype=np.float64,
+        )
+
         for feature in self.features:
-            matrix[feature.lead_index, feature.window_index] = feature_weights[feature.feature_index]
+            matrix[feature.lead_index, feature.window_index] = feature_weights[
+                feature.feature_index
+            ]
+
         return matrix
 
     def _moving_average(self, signal: np.ndarray, kernel_size: int) -> np.ndarray:
@@ -607,12 +767,18 @@ class ECGWindowInterpreter:
 
         kernel_size = max(1, int(kernel_size))
         kernel = np.ones(kernel_size, dtype=np.float64) / kernel_size
+
         left_pad = kernel_size // 2
         right_pad = kernel_size - 1 - left_pad
+
         padded = np.pad(signal, (left_pad, right_pad), mode="edge")
         return np.convolve(padded, kernel, mode="valid")
 
-    def _baseline_template(self, sample: np.ndarray, strategy: MaskStrategy) -> np.ndarray:
+    def _baseline_template(
+        self,
+        sample: np.ndarray,
+        strategy: MaskStrategy,
+    ) -> np.ndarray:
         """Create the replacement baseline used for masked ECG windows."""
 
         if strategy == "zero":
@@ -620,16 +786,22 @@ class ECGWindowInterpreter:
 
         if strategy == "lead_mean":
             lead_mean = sample.mean(axis=1, keepdims=True)
-            return np.repeat(lead_mean, repeats=sample.shape[1], axis=1).astype(np.float32)
+            return np.repeat(
+                lead_mean,
+                repeats=sample.shape[1],
+                axis=1,
+            ).astype(np.float32)
 
         if strategy == "local_mean":
             baseline = np.zeros_like(sample, dtype=np.float32)
             kernel_size = max(3, self.window_size_samples)
+
             for lead_index in range(sample.shape[0]):
                 baseline[lead_index] = self._moving_average(
                     sample[lead_index],
                     kernel_size=kernel_size,
                 ).astype(np.float32)
+
             return baseline
 
         raise ValueError(f"Unsupported mask strategy '{strategy}'.")
@@ -648,18 +820,26 @@ class ECGWindowInterpreter:
 
         if sample.ndim != 2:
             raise ValueError(f"Expected sample shape [C, T], got {sample.shape}")
+
         if masks.ndim != 2 or masks.shape[1] != self.num_features:
             raise ValueError(
                 f"Expected masks shape [N, {self.num_features}], got {masks.shape}"
             )
 
         baseline = self._baseline_template(sample=sample, strategy=strategy)
-        perturbed = np.repeat(sample[None, :, :], repeats=masks.shape[0], axis=0).astype(np.float32)
+
+        perturbed = np.repeat(
+            sample[None, :, :],
+            repeats=masks.shape[0],
+            axis=0,
+        ).astype(np.float32)
 
         for feature in self.features:
             off_rows = np.where(masks[:, feature.feature_index] == 0)[0]
+
             if off_rows.size == 0:
                 continue
+
             perturbed[
                 off_rows,
                 feature.lead_index,
@@ -688,8 +868,10 @@ class LimeExplainerECG:
     ) -> None:
         if num_perturbations < 2:
             raise ValueError("num_perturbations must be at least 2.")
+
         if ridge_alpha < 0:
             raise ValueError("ridge_alpha must be non-negative.")
+
         if kernel_width <= 0:
             raise ValueError("kernel_width must be positive.")
 
@@ -707,12 +889,19 @@ class LimeExplainerECG:
         """Sample a local neighborhood of interpretable binary masks."""
 
         num_features = self.interpreter.num_features
-        masks = np.ones((self.num_perturbations, num_features), dtype=np.float32)
+        masks = np.ones(
+            (self.num_perturbations, num_features),
+            dtype=np.float32,
+        )
 
         for row_index in range(1, self.num_perturbations):
             drop_fraction = float(self.rng.uniform(0.05, 0.45))
             num_off = max(1, int(round(drop_fraction * num_features)))
-            off_indices = self.rng.choice(num_features, size=num_off, replace=False)
+            off_indices = self.rng.choice(
+                num_features,
+                size=num_off,
+                replace=False,
+            )
             masks[row_index, off_indices] = 0.0
 
         return masks
@@ -722,8 +911,12 @@ class LimeExplainerECG:
 
         off_fraction = 1.0 - masks.mean(axis=1)
         distances = np.sqrt(off_fraction)
-        weights = np.exp(-np.square(distances) / (self.kernel_width**2 + 1e-12))
+
+        weights = np.exp(
+            -np.square(distances) / (self.kernel_width**2 + 1e-12)
+        )
         weights[0] = 1.0
+
         return weights.astype(np.float64)
 
     def _fit_surrogate(
@@ -742,6 +935,7 @@ class LimeExplainerECG:
         surrogate_predictions = model.predict(masks)
         intercept = float(model.intercept_)
         coefficients = np.asarray(model.coef_, dtype=np.float64)
+
         return intercept, coefficients, surrogate_predictions
 
     def _weighted_metrics(
@@ -752,11 +946,27 @@ class LimeExplainerECG:
     ) -> tuple[float, float]:
         """Compute weighted surrogate diagnostics."""
 
-        mse = float(np.average(np.square(target_scores - surrogate_predictions), weights=locality_weights))
-        weighted_mean = float(np.average(target_scores, weights=locality_weights))
-        ss_res = float(np.sum(locality_weights * np.square(target_scores - surrogate_predictions)))
-        ss_tot = float(np.sum(locality_weights * np.square(target_scores - weighted_mean)))
+        mse = float(
+            np.average(
+                np.square(target_scores - surrogate_predictions),
+                weights=locality_weights,
+            )
+        )
+
+        weighted_mean = float(
+            np.average(target_scores, weights=locality_weights)
+        )
+
+        ss_res = float(
+            np.sum(locality_weights * np.square(target_scores - surrogate_predictions))
+        )
+
+        ss_tot = float(
+            np.sum(locality_weights * np.square(target_scores - weighted_mean))
+        )
+
         r2 = 1.0 - (ss_res / (ss_tot + 1e-12))
+
         return r2, mse
 
     def explain(
@@ -773,6 +983,7 @@ class LimeExplainerECG:
             )
 
         original_prediction = self.predictor.predict_single(sample.float())
+
         explained_class = (
             original_prediction.predicted_class
             if explain_class == "pred"
@@ -781,30 +992,38 @@ class LimeExplainerECG:
 
         masks = self._sample_masks()
         locality_weights = self._locality_weights(masks)
+
         sample_np = sample.squeeze(0).detach().cpu().numpy().astype(np.float32)
 
         target_scores: list[np.ndarray] = []
+
         for start in range(0, self.num_perturbations, self.batch_size):
             end = min(self.num_perturbations, start + self.batch_size)
             mask_chunk = masks[start:end]
+
             perturbed_chunk = self.interpreter.apply_masks(
                 sample=sample_np,
                 masks=mask_chunk,
                 strategy=self.mask_strategy,
             )
+
             perturbed_tensor = torch.from_numpy(perturbed_chunk).float()
+
             probs_chunk = self.predictor.predict_probabilities(
                 perturbed_tensor,
                 batch_size=self.batch_size,
             ).numpy()
+
             target_scores.append(probs_chunk[:, explained_class])
 
         target_scores_np = np.concatenate(target_scores, axis=0).astype(np.float64)
+
         intercept, feature_weights, surrogate_predictions = self._fit_surrogate(
             masks=masks,
             target_scores=target_scores_np,
             locality_weights=locality_weights,
         )
+
         weighted_r2, weighted_mse = self._weighted_metrics(
             target_scores=target_scores_np,
             surrogate_predictions=surrogate_predictions,
@@ -821,13 +1040,16 @@ class LimeExplainerECG:
             weighted_r2=weighted_r2,
             weighted_mse=weighted_mse,
             explained_class=explained_class,
-            original_target_score=float(original_prediction.probabilities[explained_class]),
+            original_target_score=float(
+                original_prediction.probabilities[explained_class]
+            ),
             original_surrogate_score=float(intercept + feature_weights.sum()),
             perturbation_seed=self.seed,
             mask_strategy=self.mask_strategy,
             num_perturbations=self.num_perturbations,
             kernel_width=self.kernel_width,
         )
+
         return explanation, original_prediction
 
 
@@ -847,6 +1069,7 @@ class LimeResultWriter:
 
         positive = [row for row in feature_rows if row["surrogate_weight"] > 0]
         positive.sort(key=lambda row: row["surrogate_weight"], reverse=True)
+
         return positive[:top_k]
 
     def _top_negative_rows(
@@ -858,12 +1081,17 @@ class LimeResultWriter:
 
         negative = [row for row in feature_rows if row["surrogate_weight"] < 0]
         negative.sort(key=lambda row: row["surrogate_weight"])
+
         return negative[:top_k]
 
-    def write_feature_weights_csv(self, feature_rows: Sequence[dict[str, Any]]) -> Path:
+    def write_feature_weights_csv(
+        self,
+        feature_rows: Sequence[dict[str, Any]],
+    ) -> Path:
         """Write the full interpretable feature table to CSV."""
 
         csv_path = self.output_dir / "feature_weights.csv"
+
         fieldnames = [
             "feature_index",
             "lead_index",
@@ -879,6 +1107,7 @@ class LimeResultWriter:
         with open(csv_path, "w", encoding="utf-8", newline="") as csv_file:
             writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             writer.writeheader()
+
             for row in feature_rows:
                 writer.writerow(row)
 
@@ -888,8 +1117,10 @@ class LimeResultWriter:
         """Write the main summary payload to JSON."""
 
         json_path = self.output_dir / "summary.json"
+
         with open(json_path, "w", encoding="utf-8") as json_file:
             json.dump(summary, json_file, indent=2)
+
         return json_path
 
     def _figure_context(self):
@@ -911,11 +1142,16 @@ class LimeResultWriter:
         """Plot all leads with the most influential windows shaded."""
 
         plt, Patch = self._figure_context()
-        time_axis = np.arange(sample.shape[1], dtype=np.float32) / interpreter.sampling_rate_hz
+
+        time_axis = (
+            np.arange(sample.shape[1], dtype=np.float32)
+            / interpreter.sampling_rate_hz
+        )
 
         num_channels = sample.shape[0]
         ncols = 3 if num_channels >= 6 else (2 if num_channels > 1 else 1)
         nrows = math.ceil(num_channels / ncols)
+
         fig, axes = plt.subplots(
             nrows=nrows,
             ncols=ncols,
@@ -924,8 +1160,13 @@ class LimeResultWriter:
             sharex=False,
         )
 
-        axes_array = np.atleast_1d(np.array(axes, dtype=object)).reshape(nrows, ncols)
+        axes_array = np.atleast_1d(np.array(axes, dtype=object)).reshape(
+            nrows,
+            ncols,
+        )
+
         selected_rows = list(top_positive_rows) + list(top_negative_rows)
+
         max_abs_weight = max(
             (abs(row["surrogate_weight"]) for row in selected_rows),
             default=1.0,
@@ -935,6 +1176,7 @@ class LimeResultWriter:
             ax = axes_array.flat[lead_index]
             lead_name = interpreter.lead_names[lead_index]
             signal = sample[lead_index]
+
             ax.plot(time_axis, signal, color="black", linewidth=1.0)
 
             y0, y1 = np.percentile(signal, 1), np.percentile(signal, 99)
@@ -944,14 +1186,30 @@ class LimeResultWriter:
             for row in top_positive_rows:
                 if row["lead_index"] != lead_index:
                     continue
-                alpha = 0.15 + 0.35 * (abs(row["surrogate_weight"]) / max_abs_weight)
-                ax.axvspan(row["start_sec"], row["end_sec"], color="#c0392b", alpha=alpha)
+
+                alpha = 0.15 + 0.35 * (
+                    abs(row["surrogate_weight"]) / max_abs_weight
+                )
+                ax.axvspan(
+                    row["start_sec"],
+                    row["end_sec"],
+                    color="#c0392b",
+                    alpha=alpha,
+                )
 
             for row in top_negative_rows:
                 if row["lead_index"] != lead_index:
                     continue
-                alpha = 0.15 + 0.35 * (abs(row["surrogate_weight"]) / max_abs_weight)
-                ax.axvspan(row["start_sec"], row["end_sec"], color="#2c7fb8", alpha=alpha)
+
+                alpha = 0.15 + 0.35 * (
+                    abs(row["surrogate_weight"]) / max_abs_weight
+                )
+                ax.axvspan(
+                    row["start_sec"],
+                    row["end_sec"],
+                    color="#2c7fb8",
+                    alpha=alpha,
+                )
 
             ax.set_title(f"Lead {lead_name}")
             ax.set_xlabel("Time (s)")
@@ -962,15 +1220,25 @@ class LimeResultWriter:
             axes_array.flat[spare_index].axis("off")
 
         legend_handles = [
-            Patch(facecolor="#c0392b", alpha=0.35, label="Supports explained class"),
-            Patch(facecolor="#2c7fb8", alpha=0.35, label="Opposes explained class"),
+            Patch(
+                facecolor="#c0392b",
+                alpha=0.35,
+                label="Supports explained class",
+            ),
+            Patch(
+                facecolor="#2c7fb8",
+                alpha=0.35,
+                label="Opposes explained class",
+            ),
         ]
+
         fig.legend(handles=legend_handles, loc="upper right")
-        fig.suptitle(title, fontsize=14)
+        fig.suptitle(title, fontsize=11)
 
         output_path = self.output_dir / "leadwise_windows.png"
         fig.savefig(output_path, dpi=180)
         plt.close(fig)
+
         return output_path
 
     def save_heatmap(
@@ -982,10 +1250,12 @@ class LimeResultWriter:
         """Save a heatmap over lead by time-window importance."""
 
         plt, _ = self._figure_context()
+
         fig, ax = plt.subplots(figsize=(14, 5.5), constrained_layout=True)
 
         max_abs = float(np.max(np.abs(weight_matrix))) if weight_matrix.size else 1.0
         max_abs = max(max_abs, 1e-8)
+
         image = ax.imshow(
             weight_matrix,
             aspect="auto",
@@ -1000,13 +1270,14 @@ class LimeResultWriter:
             f"{(index * interpreter.window_size_samples) / interpreter.sampling_rate_hz:.1f}"
             for index in xticks
         ]
+
         ax.set_xticks(xticks)
         ax.set_xticklabels(xticklabels, rotation=45, ha="right")
         ax.set_yticks(np.arange(interpreter.num_channels))
         ax.set_yticklabels(interpreter.lead_names)
         ax.set_xlabel("Window Start Time (s)")
         ax.set_ylabel("Lead")
-        ax.set_title(title)
+        ax.set_title(title, fontsize=11)
 
         colorbar = fig.colorbar(image, ax=ax, pad=0.02)
         colorbar.set_label("Surrogate Weight")
@@ -1014,6 +1285,7 @@ class LimeResultWriter:
         output_path = self.output_dir / "importance_heatmap.png"
         fig.savefig(output_path, dpi=180)
         plt.close(fig)
+
         return output_path
 
     def save_top_bar_plot(
@@ -1025,9 +1297,14 @@ class LimeResultWriter:
         """Save a bar plot of the most positive and negative windows."""
 
         plt, _ = self._figure_context()
+
         rows = list(top_positive_rows) + list(reversed(top_negative_rows))
+
         fig_height = max(4.0, 0.42 * max(len(rows), 1))
-        fig, ax = plt.subplots(figsize=(10.5, fig_height), constrained_layout=True)
+        fig, ax = plt.subplots(
+            figsize=(10.5, fig_height),
+            constrained_layout=True,
+        )
 
         if rows:
             labels = [row["display_name"] for row in rows]
@@ -1035,13 +1312,15 @@ class LimeResultWriter:
             colors = ["#c0392b" if value >= 0 else "#2c7fb8" for value in values]
 
             positions = np.arange(len(rows))
+
             ax.barh(positions, values, color=colors)
             ax.set_yticks(positions)
             ax.set_yticklabels(labels)
             ax.axvline(0.0, color="black", linewidth=1.0)
             ax.set_xlabel("Surrogate Weight")
-            ax.set_title(title)
+            ax.set_title(title, fontsize=11)
             ax.grid(True, axis="x", alpha=0.20)
+
         else:
             ax.text(
                 0.5,
@@ -1051,12 +1330,13 @@ class LimeResultWriter:
                 va="center",
                 transform=ax.transAxes,
             )
-            ax.set_title(title)
+            ax.set_title(title, fontsize=11)
             ax.axis("off")
 
         output_path = self.output_dir / "top_windows_barplot.png"
         fig.savefig(output_path, dpi=180)
         plt.close(fig)
+
         return output_path
 
     def write_all(
@@ -1079,8 +1359,16 @@ class LimeResultWriter:
         weight_matrix = interpreter.feature_weight_matrix(explanation.feature_weights)
 
         explanation_title = (
-            f"{summary_context['dataset']} {summary_context['sampling_rate_hz']} Hz | "
-            f"true={LABEL_MAP[true_class]} | pred={LABEL_MAP[prediction.predicted_class]} | "
+            f"{summary_context['dataset']} | "
+            f"{summary_context['sampling_rate_hz']} Hz | "
+            f"{summary_context['model']} | "
+            f"{summary_context['split']} | "
+            f"sample_idx={summary_context['sample_index']} | "
+            f"selected={summary_context['selection_source']} | "
+            f"true={LABEL_MAP[true_class]} | "
+            f"pred={LABEL_MAP[prediction.predicted_class]} | "
+            f"case={summary_context['prediction_case']} | "
+            f"uncertainty={summary_context['uncertainty_status']} | "
             f"P(AFIB)={prediction.probabilities[1]:.4f} | "
             f"explained={LABEL_MAP[explanation.explained_class]}"
         )
@@ -1092,11 +1380,13 @@ class LimeResultWriter:
             top_negative_rows=top_negative_rows,
             title=explanation_title,
         )
+
         heatmap_path = self.save_heatmap(
             weight_matrix=weight_matrix,
             interpreter=interpreter,
             title=f"LIME Heatmap | {explanation_title}",
         )
+
         barplot_path = self.save_top_bar_plot(
             top_positive_rows=top_positive_rows,
             top_negative_rows=top_negative_rows,
@@ -1109,12 +1399,22 @@ class LimeResultWriter:
             "model": summary_context["model"],
             "split": summary_context["split"],
             "sample_index": summary_context["sample_index"],
+            "selection_source": summary_context["selection_source"],
+            "selection_mode": summary_context["selection_mode"],
+            "representative_case_requested": summary_context[
+                "representative_case_requested"
+            ],
             "true_label": LABEL_MAP[true_class],
             "predicted_label": LABEL_MAP[prediction.predicted_class],
+            "prediction_case": summary_context["prediction_case"],
+            "uncertainty_status": summary_context["uncertainty_status"],
+            "uncertainty_margin": summary_context["uncertainty_margin"],
             "explained_class": LABEL_MAP[explanation.explained_class],
             "class_probabilities": {
                 LABEL_MAP[class_index]: float(probability)
-                for class_index, probability in enumerate(prediction.probabilities.tolist())
+                for class_index, probability in enumerate(
+                    prediction.probabilities.tolist()
+                )
             },
             "window_size_sec": interpreter.window_sec,
             "window_size_samples": interpreter.window_size_samples,
@@ -1149,7 +1449,9 @@ class LimeResultWriter:
                 "top_windows_barplot": str(barplot_path),
             },
         }
+
         json_path = self.write_summary_json(summary_payload)
+
         return {
             "summary_json": json_path,
             "feature_weights_csv": csv_path,
@@ -1164,14 +1466,21 @@ def validate_args(args: argparse.Namespace) -> None:
 
     if args.sample_idx is None and args.representative_case is None:
         raise ValueError("Provide --sample_idx or use --representative_case.")
+
     if args.window_sec <= 0:
         raise ValueError("--window_sec must be positive.")
+
     if args.top_k <= 0:
         raise ValueError("--top_k must be positive.")
+
     if args.num_perturbations < 2:
         raise ValueError("--num_perturbations must be at least 2.")
+
     if args.batch_size <= 0:
         raise ValueError("--batch_size must be positive.")
+
+    if args.uncertainty_margin < 0:
+        raise ValueError("--uncertainty_margin must be non-negative.")
 
 
 def default_output_dir(
@@ -1180,8 +1489,12 @@ def default_output_dir(
     model_name: str,
     split: str,
     sample_index: int,
+    representative_case: str | None = None,
 ) -> Path:
     """Create the default output location for one explanation run."""
+
+    case_name = representative_case or "manual"
+    folder_name = f"{split}_{case_name}_sample_{sample_index}"
 
     return (
         PROJECT_ROOT
@@ -1189,7 +1502,7 @@ def default_output_dir(
         / dataset_name
         / fs_dir_name
         / model_name
-        / f"{split}_sample_{sample_index}"
+        / folder_name
     )
 
 
@@ -1201,16 +1514,21 @@ def run() -> None:
     set_deterministic_seed(args.seed)
 
     data_dir = resolve_existing_path(args.data_path)
+
     dataset_name = data_dir.parent.name
     fs_dir_name = data_dir.name
     sampling_rate_hz = parse_sampling_rate(fs_dir_name)
 
     X, y = load_split_tensor(data_dir=data_dir, split=args.split)
+
     if len(y) == 0:
-        raise ValueError(f"No samples were found in split '{args.split}' at {data_dir}")
+        raise ValueError(
+            f"No samples were found in split '{args.split}' at {data_dir}"
+        )
 
     in_channels = int(X[0].shape[0])
     num_classes = int(torch.max(y).item() + 1)
+
     predictor = EnsemblePredictor(
         model_name=args.model,
         dataset_name=dataset_name,
@@ -1223,16 +1541,25 @@ def run() -> None:
     )
 
     selection_context: dict[str, Any] | None = None
+
     if args.representative_case is not None:
-        selector = RepresentativeSampleSelector(predictor=predictor, batch_size=args.batch_size)
+        selector = RepresentativeSampleSelector(
+            predictor=predictor,
+            batch_size=args.batch_size,
+        )
+
         sample_index, selection_context = selector.select(
             X=X,
             y=y,
             case=args.representative_case,
         )
+
+        selection_source = args.representative_case
+
     else:
         assert args.sample_idx is not None
         sample_index = args.sample_idx
+        selection_source = "manual_sample_idx"
 
     if sample_index < 0 or sample_index >= len(y):
         raise IndexError(
@@ -1241,6 +1568,7 @@ def run() -> None:
 
     sample = X[sample_index].unsqueeze(0).float()
     true_class = int(y[sample_index].item())
+
     interpreter = ECGWindowInterpreter(
         num_channels=sample.shape[1],
         time_length=sample.shape[2],
@@ -1258,10 +1586,26 @@ def run() -> None:
         kernel_width=args.kernel_width,
         batch_size=args.batch_size,
     )
+
     explanation, prediction = explainer.explain(
         sample=sample,
         true_class=true_class,
         explain_class=args.explain_class,
+    )
+
+    prediction_case = classify_prediction_case(
+        true_class=true_class,
+        predicted_class=prediction.predicted_class,
+    )
+
+    uncertainty_status = classify_uncertainty(
+        probabilities=prediction.probabilities,
+        margin=args.uncertainty_margin,
+    )
+
+    selection_mode = format_selection_mode(
+        representative_case=args.representative_case,
+        sample_index=sample_index,
     )
 
     output_dir = (
@@ -1273,8 +1617,10 @@ def run() -> None:
             model_name=args.model,
             split=args.split,
             sample_index=sample_index,
+            representative_case=args.representative_case,
         )
     )
+
     writer = LimeResultWriter(output_dir=output_dir)
 
     saved_files = writer.write_all(
@@ -1289,26 +1635,49 @@ def run() -> None:
             "model": args.model,
             "split": args.split,
             "sample_index": sample_index,
+            "selection_source": selection_source,
+            "selection_mode": selection_mode,
+            "representative_case_requested": args.representative_case,
+            "prediction_case": prediction_case,
+            "uncertainty_status": uncertainty_status,
+            "uncertainty_margin": args.uncertainty_margin,
             "ridge_alpha": args.ridge_alpha,
             "selection_context": selection_context,
         },
         top_k=args.top_k,
     )
 
-    print(f"Dataset           : {dataset_name}")
-    print(f"Sampling rate     : {sampling_rate_hz} Hz")
-    print(f"Model             : {args.model}")
-    print(f"Split             : {args.split}")
-    print(f"Sample index      : {sample_index}")
-    print(f"True label        : {LABEL_MAP[true_class]}")
-    print(f"Predicted label   : {LABEL_MAP[prediction.predicted_class]}")
-    print(f"P(NORMAL)         : {prediction.probabilities[0]:.4f}")
-    print(f"P(AFIB)           : {prediction.probabilities[1]:.4f}")
-    print(f"Explained class   : {LABEL_MAP[explanation.explained_class]}")
-    print(f"Mask strategy     : {explanation.mask_strategy}")
-    print(f"Perturbations     : {explanation.num_perturbations}")
-    print(f"Weighted surrogate R^2 : {explanation.weighted_r2:.4f}")
-    print(f"Output directory  : {writer.output_dir}")
+    print(f"Dataset                    : {dataset_name}")
+    print(f"Sampling rate              : {sampling_rate_hz} Hz")
+    print(f"Model                      : {args.model}")
+    print(f"Split                      : {args.split}")
+    print(f"Sample index               : {sample_index}")
+    print(f"Selection source           : {selection_source}")
+    print(f"Selection mode             : {selection_mode}")
+    print(f"Requested representative   : {args.representative_case or 'none'}")
+    print(f"True label                 : {LABEL_MAP[true_class]}")
+    print(f"Predicted label            : {LABEL_MAP[prediction.predicted_class]}")
+    print(f"Prediction case            : {prediction_case}")
+    print(f"Uncertainty status         : {uncertainty_status}")
+    print(f"Uncertainty margin         : {args.uncertainty_margin}")
+    print(f"P(NORMAL)                  : {prediction.probabilities[0]:.4f}")
+    print(f"P(AFIB)                    : {prediction.probabilities[1]:.4f}")
+    print(f"Explained class            : {LABEL_MAP[explanation.explained_class]}")
+    print(f"Device                     : {predictor.device}")
+    print(f"Mask strategy              : {explanation.mask_strategy}")
+    print(f"Perturbations              : {explanation.num_perturbations}")
+    print(f"Window seconds             : {args.window_sec}")
+    print(f"Window samples             : {interpreter.window_size_samples}")
+    print(f"Interpretable features     : {interpreter.num_features}")
+    print(f"Weighted surrogate R^2     : {explanation.weighted_r2:.4f}")
+    print(f"Weighted surrogate MSE     : {explanation.weighted_mse:.6f}")
+    print(f"Output directory           : {writer.output_dir}")
+
+    if selection_context is not None:
+        print("Selection context:")
+        for key, value in selection_context.items():
+            print(f"  - {key}: {value}")
+
     print("Saved files:")
     for name, path in saved_files.items():
         print(f"  - {name}: {path}")
