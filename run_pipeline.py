@@ -8,7 +8,7 @@ Main features:
 - metric summary generation
 - ROC/PR, confusion matrix, calibration and dataset plots
 - LIME explanation launcher
-- Grad-CAM notebook launcher
+- Grad-CAM explantion launcher
 - live command log
 - image preview for generated plots
 
@@ -842,8 +842,9 @@ class PipelineGUI(tk.Tk):
 
         ttk.Button(
             box,
-            text="Open Grad-CAM notebook",
-            command=self.open_gradcam_notebook,
+            text="Run Grad-CAM explanation",
+            style="Primary.TButton",
+            command=self.run_gradcam,
         ).pack(side="left", padx=4, pady=4)
 
         ttk.Button(
@@ -975,6 +976,7 @@ class PipelineGUI(tk.Tk):
         root = self._project_root()
 
         folders = [
+            root / "outputs",
             root / "figures",
             root / "checkpoints",
             root / "lime_results",
@@ -1163,12 +1165,11 @@ class PipelineGUI(tk.Tk):
             ]
         )
 
-        gradcam_notebook = self._find_existing_script_silent(
+        gradcam_script = self._find_existing_script_silent(
             [
-                "xai_gradcam.ipynb",
-                "src/xai_gradcam.ipynb",
-                "explainable/xai_gradcam.ipynb",
-                "src/explainable/xai_gradcam.ipynb",
+                "explainable/explain_gradcam.py",
+                "src/explainable/explain_gradcam.py",
+                "explain_gradcam.py",
             ]
         )
 
@@ -1179,8 +1180,8 @@ class PipelineGUI(tk.Tk):
             lime_script is not None,
         )
         self._log_status_line(
-            f"Grad-CAM notebook: {gradcam_notebook if gradcam_notebook else 'not found'}",
-            gradcam_notebook is not None,
+            f"Grad-CAM notebook: {gradcam_script if gradcam_script else 'not found'}",
+            gradcam_script is not None,
         )
 
         rates = self._selected_rates()
@@ -1518,24 +1519,46 @@ class PipelineGUI(tk.Tk):
 
         self._run(cmd)
 
-    def open_gradcam_notebook(self) -> None:
-        nb = self._find_existing_script_silent(
-            [
-                "xai_gradcam.ipynb",
-                "src/xai_gradcam.ipynb",
-                "explainable/xai_gradcam.ipynb",
-                "src/explainable/xai_gradcam.ipynb",
-            ]
-        )
-
-        if not nb:
-            messagebox.showerror(
-                "Notebook not found",
-                "Could not find xai_gradcam.ipynb in project root, src/, or explainable/.",
-            )
+    def run_gradcam(self) -> None:
+        rates = self._selected_rates()
+        if len(rates) != 1:
+            messagebox.showwarning("Choose one frequency", "Grad-CAM needs exactly one sampling frequency.")
             return
 
-        self._run([*self._py_cmd(), "-m", "jupyter", "notebook", str(nb)])
+        script = self._find_script([
+            "explainable/explain_gradcam.py",
+            "src/explainable/explain_gradcam.py",
+            "explain_gradcam.py"
+        ])
+        
+        if not script:
+            return
+
+        rep = self.representative_case.get().strip()
+        # Map GUI representative strings to script choices
+        rep_map = {
+            "correct_afib": "correct_afib",
+            "correct_normal": "correct_normal",
+            "uncertain": "borderline" # The script uses 'borderline'
+        }
+
+        cmd = [
+            *self._py_cmd(),
+            str(script),
+            "--frequency", rates[0],
+            "--model_type", self.model.get(),
+            "--device", self.device.get()
+        ]
+
+        if self.output_dir.get().strip():
+            cmd += ["--output_dir", self.output_dir.get().strip()]
+
+        if rep in rep_map:
+            cmd += ["--representative_case", rep_map[rep]]
+        else:
+            cmd += ["--sample_idx", self.sample_idx.get()]
+
+        self._run(cmd)
 
     def open_lime_results(self) -> None:
         if self.output_dir.get().strip():
