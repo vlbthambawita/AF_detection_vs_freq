@@ -27,7 +27,7 @@ class ShortcutConvBlock1D(nn.Module):
         self.act = nn.ReLU(inplace=True)
         self.drop = nn.Dropout(dropout)
 
-        # Main vs shortcut pooling (paper-specific)
+        # Main vs shortcut pooling
         self.avgpool = nn.AvgPool1d(kernel_size=pool_kernel, stride=pool_kernel)
         self.maxpool = nn.MaxPool1d(kernel_size=pool_kernel, stride=pool_kernel)
 
@@ -38,7 +38,6 @@ class ShortcutConvBlock1D(nn.Module):
         x = self.act(x)
         x = self.drop(x)
 
-        # Shortcut processes "part" of transmitted data => split channels
         c_half = x.size(1) // 2
         x_main = x[:, :c_half, :]     
         x_short = x[:, c_half:, :]   
@@ -66,7 +65,7 @@ class CNN_LSTM_ECG(nn.Module):
     def __init__(self, in_channels, num_classes, dropout=0.3):
         super().__init__()
 
-        # 8 CNN layers (keep channels even for clean splitting)
+        # 8 CNN layers 
         ch = [32, 32, 64, 64, 128, 128, 256, 256]
 
         blocks = []
