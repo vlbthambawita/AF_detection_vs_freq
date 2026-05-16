@@ -4,7 +4,7 @@ import torch.nn as nn
 
 class ShortcutConvBlock1D(nn.Module):
     """
-    paper used: https://pmc.ncbi.nlm.nih.gov/articles/PMC7348856/?utm_source=chatgpt.com
+    paper used: https://pmc.ncbi.nlm.nih.gov/articles/PMC7348856/
     Paper-style shortcut conv block:
       BN -> Conv1D -> ReLU -> Dropout -> (AvgPool main + MaxPool shortcut on part of channels)
 
@@ -21,7 +21,7 @@ class ShortcutConvBlock1D(nn.Module):
             in_channels=in_ch,
             out_channels=out_ch,
             kernel_size=kernel_size,
-            padding=kernel_size // 2,  # keep length before pooling
+            padding=kernel_size // 2,
             bias=False,
         )
         self.act = nn.ReLU(inplace=True)
@@ -34,21 +34,21 @@ class ShortcutConvBlock1D(nn.Module):
     def forward(self, x):
         # x: (B, C_in, T)
         x = self.bn(x)
-        x = self.conv(x)     # (B, C_out, T)
+        x = self.conv(x)     
         x = self.act(x)
         x = self.drop(x)
 
         # Shortcut processes "part" of transmitted data => split channels
         c_half = x.size(1) // 2
-        x_main = x[:, :c_half, :]     # first half channels (main)
-        x_short = x[:, c_half:, :]    # second half channels (shortcut)
+        x_main = x[:, :c_half, :]     
+        x_short = x[:, c_half:, :]   
 
         # Main uses AvgPool, shortcut uses MaxPool
-        x_main = self.avgpool(x_main)     # (B, C_out/2, T/2)
-        x_short = self.maxpool(x_short)   # (B, C_out/2, T/2)
+        x_main = self.avgpool(x_main)    
+        x_short = self.maxpool(x_short)   
 
         # Concatenate back (paper-style fusion)
-        return torch.cat([x_main, x_short], dim=1)  # (B, C_out, T/2)
+        return torch.cat([x_main, x_short], dim=1)  
 
 
 class CNN_LSTM_ECG(nn.Module):
@@ -66,8 +66,7 @@ class CNN_LSTM_ECG(nn.Module):
     def __init__(self, in_channels, num_classes, dropout=0.3):
         super().__init__()
 
-        # 8 CNN layers (keep channels EVEN for clean splitting)
-        # You can tweak these, but the "8 blocks + shortcut pooling + k=10" is the paper-critical part.
+        # 8 CNN layers (keep channels even for clean splitting)
         ch = [32, 32, 64, 64, 128, 128, 256, 256]
 
         blocks = []
@@ -77,7 +76,7 @@ class CNN_LSTM_ECG(nn.Module):
                 ShortcutConvBlock1D(
                     in_ch=c_in,
                     out_ch=c_out,
-                    kernel_size=10,   # paper uses 10x1 filter
+                    kernel_size=10,   
                     dropout=dropout,
                     pool_kernel=2
                 )
@@ -86,17 +85,17 @@ class CNN_LSTM_ECG(nn.Module):
 
         self.cnn = nn.Sequential(*blocks)
 
-        # 1-layer LSTM (paper)
+        # 1-layer LSTM 
         self.lstm = nn.LSTM(
             input_size=ch[-1],
             hidden_size=128,
             num_layers=1,
             batch_first=True,
-            dropout=0.0,   # no effect for 1 layer
+            dropout=0.0,   
             bidirectional=False
         )
 
-        # FC classifier (paper ends with FC for classification)
+        # FC classifier 
         self.classifier = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(128, num_classes)
@@ -104,12 +103,11 @@ class CNN_LSTM_ECG(nn.Module):
 
     def forward(self, x):
         # x: (B, C, T)
-        x = self.cnn(x)          # (B, 256, T')  (each block halves time => T' = T / 2^8)
-        x = x.permute(0, 2, 1)   # (B, T', 256)
+        x = self.cnn(x)          
+        x = x.permute(0, 2, 1)   
 
-        out, _ = self.lstm(x)    # (B, T', 128)
+        out, _ = self.lstm(x)    
 
-        # Paper doesn't use attention; a stable choice is mean pooling
-        out = out.mean(dim=1)    # (B, 128)
+        out = out.mean(dim=1)   
 
-        return self.classifier(out)  # (B, num_classes)
+        return self.classifier(out)  
