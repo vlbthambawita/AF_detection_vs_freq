@@ -180,10 +180,10 @@ class PipelineGUI(tk.Tk):
 
         self.project_root = tk.StringVar(value=str(root))
         self.raw_data_path = tk.StringVar(value=str(root / "data"))
-        self.prepared_root = tk.StringVar(value=str(root / "prepared_data" / "ptbl-xl"))
-        self.dataset_name = tk.StringVar(value="ptbl-xl")
+        self.prepared_root = tk.StringVar(value=str(root / "prepared_data" / "ptb-xl"))
+        self.dataset_name = tk.StringVar(value="ptb-xl")
         self.out_root = tk.StringVar(value=str(root / "prepared_data"))
-        self.checkpoint_root = tk.StringVar(value=str(root / "checkpoints" / "ptbl-xl"))
+        self.checkpoint_root = tk.StringVar(value=str(root / "checkpoints" / "ptb-xl"))
         self.output_dir = tk.StringVar(value="")
 
         self.model = tk.StringVar(value="cnn1d")
@@ -779,31 +779,6 @@ class PipelineGUI(tk.Tk):
             command=self.run_calibration,
         ).pack(side="left", padx=4, pady=4)
 
-        thesis_box = ttk.LabelFrame(
-            tab,
-            text="Dataset / thesis-support plots",
-            style="Section.TLabelframe",
-            padding=10,
-        )
-        thesis_box.pack(fill="x", pady=10)
-
-        ttk.Button(
-            thesis_box,
-            text="Sampling illustration",
-            command=self.run_sampling_plot,
-        ).pack(side="left", padx=4, pady=4)
-
-        ttk.Button(
-            thesis_box,
-            text="Balancing modes",
-            command=self.run_balancing_plot,
-        ).pack(side="left", padx=4, pady=4)
-
-        ttk.Button(
-            thesis_box,
-            text="AFIB/NORMAL statistics",
-            command=self.run_afib_norm_stats,
-        ).pack(side="left", padx=4, pady=4)
 
     def _tab_xai(self) -> None:
         tab = ttk.Frame(self.tabs, padding=14, style="Panel.TFrame")
@@ -858,7 +833,8 @@ class PipelineGUI(tk.Tk):
             "If Representative case is empty, Sample index is used manually.\n"
             "If Representative case is selected, LIME automatically finds a matching test sample "
             "and writes its real sample_idx on the plots.\n"
-            "Uncertainty margin 0.10 means P(AFIB) from 0.40 to 0.60 is marked uncertain."
+            "Uncertainty margin 0.10 means P(AFIB) from 0.40 to 0.60 is marked uncertain.\n"
+            "As for Gradcam, If index is empty, a random sample is chosen. Requires 'test.pt'.)"
         )
         ttk.Label(
             tab,
@@ -981,7 +957,6 @@ class PipelineGUI(tk.Tk):
             root / "checkpoints",
             root / "lime_results",
             root / "explainable",
-            root / "src" / "thesis_report_plotting",
             root / "src" / "plotting",
         ]
 
@@ -1423,16 +1398,6 @@ class PipelineGUI(tk.Tk):
     def run_calibration(self) -> None:
         self._run_script_candidates(["src/plotting/probability_calibiration_curv_2.py"])
 
-    def run_sampling_plot(self) -> None:
-        self._run_script_candidates(["src/thesis_report_plotting/figure_resampling.py"])
-
-    def run_balancing_plot(self) -> None:
-        self._run_script_candidates(["src/thesis_report_plotting/different_balancing_mode.py"])
-
-    def run_afib_norm_stats(self) -> None:
-        self._run_script_candidates(
-            ["src/thesis_report_plotting/plot_ptbxl_afib_norm_statistics_percent.py"]
-        )
 
     def run_lime(self) -> None:
         rates = self._selected_rates()
@@ -1556,7 +1521,9 @@ class PipelineGUI(tk.Tk):
         if rep in rep_map:
             cmd += ["--representative_case", rep_map[rep]]
         else:
-            cmd += ["--sample_idx", self.sample_idx.get()]
+            val = self.sample_idx.get().strip()
+            if val:
+                cmd += ["--sample_idx", val]
 
         self._run(cmd)
 
@@ -1581,7 +1548,7 @@ class PipelineGUI(tk.Tk):
 
         try:
             if sys.platform.startswith("win"):
-                os.startfile(str(path))  # type: ignore[attr-defined]
+                os.startfile(str(path))  
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", str(path)])
             else:
