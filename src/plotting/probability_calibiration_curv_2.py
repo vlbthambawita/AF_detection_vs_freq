@@ -17,7 +17,7 @@ except Exception:
 
 
 # ================= CONFIG =================
-ROOT = Path("checkpoints/ptbl-xl")
+ROOT = Path("checkpoints/ptb-xl")
 MODEL = "cnn_lstm"
 FOLDS = 5
 FREQS = ["62hz", "100hz", "250hz", "500hz"]

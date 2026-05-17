@@ -10,7 +10,7 @@ from sklearn.metrics import (
 )
 
 # ================= CONFIG =================
-ROOT = Path("checkpoints/ptbl-xl")
+ROOT = Path("checkpoints/ptb-xl")
 FREQS = ["62hz", "100hz", "250hz", "500hz"]
 FOLDS = 5
 
