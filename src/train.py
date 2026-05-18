@@ -61,18 +61,20 @@ def print_dataset_stats(name, dataset):
 def make_balanced_subset_binary(dataset, seed=42):
     """
     Downsample majority class to match minority class.
+
     Used for:
     - training subset balancing
     - secondary balanced test evaluation
 
-    Validation is NOT balanced.
+    Validation is not balanced by this function unless the user already
+    prepared a balanced validation split during preprocessing.
     """
 
     rng = np.random.RandomState(seed)
 
     labels = np.array(
         [int(dataset[i][1]) for i in range(len(dataset))],
-        dtype=int
+        dtype=int,
     )
 
     idx0 = np.where(labels == 0)[0]
@@ -99,7 +101,7 @@ def build_model(model_name, in_ch, num_classes):
     if model_name == "cnn_lstm":
         return CNN_LSTM_ECG(
             in_channels=in_ch,
-            num_classes=num_classes
+            num_classes=num_classes,
         )
 
     raise ValueError(f"Unknown model type: {model_name}")
@@ -112,6 +114,157 @@ def make_loader(dataset, batch_size, shuffle, device):
         shuffle=shuffle,
         num_workers=0,
         pin_memory=(device == "cuda"),
+    )
+
+
+def tensor_file_to_dataset(pt_path: Path):
+    """
+    Load a .pt split file containing X and y into the same lightweight
+    ECGDataset object style used by the existing code.
+    """
+
+    if not pt_path.exists():
+        raise FileNotFoundError(f"Missing dataset split file: {pt_path}")
+
+    data = torch.load(pt_path, map_location="cpu")
+
+    if "X" not in data or "y" not in data:
+        raise KeyError(f"{pt_path} must contain keys 'X' and 'y'.")
+
+    ds = ECGDataset.__new__(ECGDataset)
+    ds.X = data["X"]
+    ds.y = data["y"]
+
+    # Preserve optional metadata if present.
+    if "record_ids" in data:
+        ds.record_ids = data["record_ids"]
+    if "patient_ids" in data:
+        ds.patient_ids = data["patient_ids"]
+
+    return ds
+
+
+def dataset_labels(dataset):
+    """
+    Return labels from either a full ECGDataset-like object or a torch Subset.
+
+    make_balanced_subset_binary() returns torch.utils.data.Subset.
+    Subset does not expose .y directly, so label access must also work
+    through __getitem__.
+    """
+
+    if hasattr(dataset, "y"):
+        y = dataset.y
+
+        if isinstance(y, torch.Tensor):
+            return y.detach().cpu().long()
+
+        return torch.tensor(y, dtype=torch.long)
+
+    labels = [int(dataset[i][1]) for i in range(len(dataset))]
+
+    if not labels:
+        raise ValueError("Cannot infer labels from an empty dataset.")
+
+    return torch.tensor(labels, dtype=torch.long)
+
+
+def infer_num_classes(*datasets):
+    """
+    Infer the number of classes from one or more datasets.
+    Works for both ECGDataset-like objects and torch Subset objects.
+    """
+
+    max_label = None
+
+    for dataset in datasets:
+        labels = dataset_labels(dataset)
+
+        if labels.numel() == 0:
+            continue
+
+        current_max = int(torch.max(labels).item())
+        max_label = current_max if max_label is None else max(max_label, current_max)
+
+    if max_label is None:
+        raise ValueError("Cannot infer number of classes from empty dataset(s).")
+
+    return max_label + 1
+
+
+def infer_in_channels(dataset):
+    if len(dataset) == 0:
+        raise ValueError("Cannot infer input channels from an empty dataset.")
+
+    return int(dataset[0][0].shape[0])
+
+
+def find_test_file(data_dir: Path) -> Path | None:
+    """
+    Support both:
+    - k-fold + hold-out structure: data_dir/test/test.pt
+    - manual split structure:      data_dir/test.pt
+    """
+
+    candidates = [
+        data_dir / "test" / "test.pt",
+        data_dir / "test.pt",
+    ]
+
+    for p in candidates:
+        if p.exists():
+            return p
+
+    return None
+
+
+def detect_split_mode(data_dir: Path, requested_mode: str, kfolds: int) -> str:
+    """
+    Decide whether training should use:
+    - kfold:  fold_1.pt ... fold_k.pt
+    - manual: train.pt and val.pt
+
+    requested_mode can be:
+    - auto
+    - kfold
+    - manual
+    """
+
+    fold_files = [data_dir / f"fold_{i}.pt" for i in range(1, kfolds + 1)]
+    has_all_folds = all(p.exists() for p in fold_files)
+
+    has_manual = (data_dir / "train.pt").exists() and (data_dir / "val.pt").exists()
+
+    if requested_mode == "kfold":
+        if not has_all_folds:
+            missing = [str(p) for p in fold_files if not p.exists()]
+            raise FileNotFoundError(
+                "split_mode=kfold was requested, but not all fold files exist.\n"
+                "Missing:\n" + "\n".join(missing)
+            )
+        return "kfold"
+
+    if requested_mode == "manual":
+        if not has_manual:
+            raise FileNotFoundError(
+                "split_mode=manual was requested, but train.pt and/or val.pt is missing.\n"
+                f"Expected:\n{data_dir / 'train.pt'}\n{data_dir / 'val.pt'}"
+            )
+        return "manual"
+
+    # Auto mode: prefer k-fold if all fold files exist, otherwise manual.
+    if has_all_folds:
+        return "kfold"
+
+    if has_manual:
+        return "manual"
+
+    raise FileNotFoundError(
+        "Could not detect split structure.\n\n"
+        "Expected either k-fold files:\n"
+        + "\n".join(str(p) for p in fold_files)
+        + "\n\nor manual split files:\n"
+        + f"{data_dir / 'train.pt'}\n{data_dir / 'val.pt'}\n"
     )
 
 
@@ -287,9 +440,9 @@ def evaluate_ensemble_with_probs(models, loader, device):
     return y_true, y_prob
 
 
-# ================= TRAIN ONE FOLD =================
+# ================= TRAIN ONE SPLIT =================
 
-def train_one_fold(
+def train_one_split(
     model,
     optimizer,
     train_loader,
@@ -298,6 +451,7 @@ def train_one_fold(
     out_dir,
     epochs,
     early_stopping_patience,
+    split_label="fold",
 ):
     loss_fn = nn.CrossEntropyLoss()
 
@@ -318,7 +472,7 @@ def train_one_fold(
     bad_epochs = 0
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    fold_start = time.time()
+    split_start = time.time()
 
     print()
 
@@ -397,7 +551,7 @@ def train_one_fold(
             print("Early stopping triggered")
             break
 
-    fold_time = time.time() - fold_start
+    split_time = time.time() - split_start
 
     recall, specificity, precision, mcc = compute_metrics_from_cm(best_cm)
 
@@ -405,7 +559,7 @@ def train_one_fold(
     fn, tp = best_cm[1]
 
     print("\n" + "=" * 70)
-    print(f"Fold Results – Training time: {fold_time / 60:.2f} minutes")
+    print(f"{split_label} Results – Training time: {split_time / 60:.2f} minutes")
     print("Confusion Matrix (Validation)")
     print(f"[[{tn:4d} {fp:3d}]")
     print(f" [{fn:4d} {tp:3d}]]\n")
@@ -424,10 +578,10 @@ def train_one_fold(
     metrics_path = out_dir / "metrics.txt"
 
     with open(metrics_path, "w") as f:
-        f.write("BEST VALIDATION METRICS (PER FOLD)\n")
+        f.write("BEST VALIDATION METRICS\n")
         f.write("=" * 60 + "\n\n")
 
-        f.write(f"Fold               : {out_dir.name}\n")
+        f.write(f"Split              : {out_dir.name}\n")
         f.write(f"Best epoch         : {best_epoch}\n")
         f.write(f"Validation loss    : {best_val_loss:.4f}\n")
         f.write(f"Validation F1      : {best_f1:.4f}\n")
@@ -444,8 +598,8 @@ def train_one_fold(
         f.write(f"MCC                 : {mcc:.4f}\n\n")
 
         f.write("RUNTIME\n")
-        f.write(f"Fold training time (sec): {fold_time:.2f}\n")
-        f.write(f"Fold training time (min): {fold_time / 60:.2f}\n\n")
+        f.write(f"Training time (sec): {split_time:.2f}\n")
+        f.write(f"Training time (min): {split_time / 60:.2f}\n\n")
 
         f.write("RUN INFO\n")
         f.write("-" * 60 + "\n")
@@ -465,259 +619,22 @@ def train_one_fold(
         "fp": int(fp),
         "fn": int(fn),
         "tp": int(tp),
-        "time_min": float(fold_time / 60.0),
+        "time_min": float(split_time / 60.0),
     }
 
 
-# ================= TEST ONLY =================
+# Backward-compatible function name if other scripts import it.
+train_one_fold = train_one_split
 
-def run_test_only(
-    data_path,
-    model_name,
-    batch_size,
-    kfolds,
-    device,
-):
-    data_dir = Path(data_path)
-    fs = int(data_dir.name.replace("hz", ""))
-    dataset_name = data_dir.parent.name
 
-    print("\nTEST ONLY MODE")
-    print("=" * 60)
-    print(f"Device        : {device}")
-    print(f"Dataset       : {dataset_name}")
-    print(f"Sampling rate : {fs} Hz")
-    print(f"Model         : {model_name}")
-    print("=" * 60)
+# ================= TRAINING MODES =================
 
-    test_data = torch.load(
-        data_dir / "test" / "test.pt",
-        map_location="cpu"
-    )
-
-    test_ds = ECGDataset.__new__(ECGDataset)
-    test_ds.X = test_data["X"]
-    test_ds.y = test_data["y"]
-
-    print_dataset_stats("Test unbalanced", test_ds)
-
-    test_loader = make_loader(
-        test_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        device=device,
-    )
-
-    test_balanced_ds = make_balanced_subset_binary(
-        test_ds,
-        seed=42,
-    )
-
-    print_dataset_stats("Test balanced", test_balanced_ds)
-
-    test_balanced_loader = make_loader(
-        test_balanced_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        device=device,
-    )
-
-    in_ch = test_ds.X[0].shape[0]
-    num_classes = int(torch.max(test_ds.y).item() + 1)
-
-    models = []
-
-    for fold in range(1, kfolds + 1):
-        m = build_model(model_name, in_ch, num_classes)
-
-        ckpt = (
-            Path("checkpoints")
-            / dataset_name
-            / f"{fs}hz"
-            / model_name
-            / f"fold_{fold}"
-            / "best.pt"
-        )
-
-        if not ckpt.exists():
-            raise FileNotFoundError(f"Missing checkpoint: {ckpt}")
-
-        m.load_state_dict(torch.load(ckpt, map_location=device))
-        m.to(device)
-        models.append(m)
-
-    out = Path("checkpoints") / dataset_name / f"{fs}hz" / model_name
-    out.mkdir(parents=True, exist_ok=True)
-
-    # ---------- Unbalanced test probabilities ----------
-    y_true_u, y_prob_u = evaluate_ensemble_with_probs(
-        models,
-        test_loader,
-        device,
-    )
-
-    auroc_u = roc_auc_score(y_true_u, y_prob_u)
-    ece_u = compute_ece_posclass(y_true_u, y_prob_u)
-
-    np.savez(
-        out / "roc_test.npz",
-        y_true=y_true_u,
-        y_score=y_prob_u,
-    )
-
-    print("\nUNBALANCED TEST")
-    print(f"AUROC : {auroc_u:.4f}")
-    print(f"ECE   : {ece_u:.4f}")
-    print(f"Prob min/mean/max: {y_prob_u.min():.4f} / {y_prob_u.mean():.4f} / {y_prob_u.max():.4f}")
-    print(f"Positive rate    : {y_true_u.mean():.4f}")
-    print("Saved:", out / "roc_test.npz")
-
-    # ---------- Balanced test probabilities ----------
-    y_true_b, y_prob_b = evaluate_ensemble_with_probs(
-        models,
-        test_balanced_loader,
-        device,
-    )
-
-    auroc_b = roc_auc_score(y_true_b, y_prob_b)
-    ece_b = compute_ece_posclass(y_true_b, y_prob_b)
-
-    np.savez(
-        out / "roc_test_balanced.npz",
-        y_true=y_true_b,
-        y_score=y_prob_b,
-    )
-
-    print("\nBALANCED TEST")
-    print(f"AUROC : {auroc_b:.4f}")
-    print(f"ECE   : {ece_b:.4f}")
-    print(f"Prob min/mean/max: {y_prob_b.min():.4f} / {y_prob_b.mean():.4f} / {y_prob_b.max():.4f}")
-    print(f"Positive rate    : {y_true_b.mean():.4f}")
-    print("Saved:", out / "roc_test_balanced.npz")
-
-    del models
-    del test_loader
-    del test_balanced_loader
-    del test_ds
-    del test_balanced_ds
-
-    gc.collect()
-
-    if device == "cuda":
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-# ================= MAIN =================
-
-def main():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--data_path", required=True)
-
-    parser.add_argument(
-        "--model",
-        choices=["cnn1d", "cnn_lstm"],
-        required=True,
-    )
-
-    parser.add_argument(
-        "--test_only",
-        action="store_true",
-        help="Skip training and run ensemble test evaluation only.",
-    )
-
-    parser.add_argument(
-        "--train_balance",
-        choices=["none", "downsample"],
-        default="downsample",
-        help=(
-            "Runtime balancing for training folds only. "
-            "Use downsample with preprocessing --balance_mode train."
-        ),
-    )
-
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=DEFAULT_BATCH_SIZE,
-    )
-
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=DEFAULT_EPOCHS,
-    )
-
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=DEFAULT_LEARNING_RATE,
-    )
-
-    parser.add_argument(
-        "--kfolds",
-        type=int,
-        default=DEFAULT_KFOLDS,
-    )
-
-    parser.add_argument(
-        "--early_stopping_patience",
-        type=int,
-        default=DEFAULT_EARLY_STOPPING_PATIENCE,
-    )
-
-    parser.add_argument(
-        "--device",
-        choices=["auto", "cuda", "cpu"],
-        default="auto",
-    )
-
-    args = parser.parse_args()
-
-    set_seed(42)
-
-    if args.device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    else:
-        device = args.device
-
-    if device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested, but torch.cuda.is_available() is False.")
-
-    data_dir = Path(args.data_path)
-    fs = int(data_dir.name.replace("hz", ""))
-    dataset_name = data_dir.parent.name
-
-    print("=" * 70)
-    print("ECG K-FOLD TRAINING")
-    print("=" * 70)
-    print(f"Device        : {device}")
-    print(f"Dataset       : {dataset_name}")
-    print(f"Sampling rate : {fs} Hz")
-    print(f"Model         : {args.model}")
-    print(f"Batch size    : {args.batch_size}")
-    print(f"Epochs        : {args.epochs}")
-    print(f"LR            : {args.lr}")
-    print(f"K-folds       : {args.kfolds}")
-    print(f"Train balance : {args.train_balance}")
-    print("=" * 70)
-
-    if args.test_only:
-        run_test_only(
-            data_path=args.data_path,
-            model_name=args.model,
-            batch_size=args.batch_size,
-            kfolds=args.kfolds,
-            device=device,
-        )
-        return
-
+def train_kfold(args, data_dir, fs, dataset_name, device):
     training_start = time.time()
     fold_results = []
 
     best_fold = None
     best_f1_overall = -1
-
-    # ================= K-FOLD LOOP =================
 
     for fold in range(1, args.kfolds + 1):
         print(f"\n=== Fold {fold}/{args.kfolds} ===")
@@ -755,7 +672,7 @@ def main():
             device=device,
         )
 
-        in_ch = train_ds[0][0].shape[0]
+        in_ch = infer_in_channels(train_ds)
 
         model = build_model(
             args.model,
@@ -768,7 +685,7 @@ def main():
             lr=args.lr,
         )
 
-        metrics = train_one_fold(
+        metrics = train_one_split(
             model=model,
             optimizer=optimizer,
             train_loader=train_loader,
@@ -777,6 +694,7 @@ def main():
             out_dir=Path("checkpoints") / dataset_name / f"{fs}hz" / args.model / f"fold_{fold}",
             epochs=args.epochs,
             early_stopping_patience=args.early_stopping_patience,
+            split_label=f"Fold {fold}",
         )
 
         fold_results.append(metrics)
@@ -799,14 +717,114 @@ def main():
             torch.cuda.synchronize()
 
     training_total_time = time.time() - training_start
-    training_total_min = training_total_time / 60
 
     print(f"\nBest fold           : {best_fold}")
     print(f"Best validation F1  : {best_f1_overall:.4f}")
-    print(f"Total training time : {training_total_min:.2f} minutes")
+    print(f"Total training time : {training_total_time / 60:.2f} minutes")
 
-    # ================= VALIDATION TABLE =================
+    write_validation_table(
+        dataset_name=dataset_name,
+        fs=fs,
+        model_name=args.model,
+        split_mode="kfold",
+        fold_results=fold_results,
+    )
 
+    return training_total_time, fold_results
+
+
+def train_manual_split(args, data_dir, fs, dataset_name, device):
+    training_start = time.time()
+
+    print("\n=== Manual split training ===")
+
+    train_ds = tensor_file_to_dataset(data_dir / "train.pt")
+    val_ds = tensor_file_to_dataset(data_dir / "val.pt")
+
+    print_dataset_stats("Train raw", train_ds)
+    print_dataset_stats("Validation", val_ds)
+
+    if args.train_balance == "downsample":
+        train_ds = make_balanced_subset_binary(
+            train_ds,
+            seed=42,
+        )
+        print_dataset_stats("Train balanced", train_ds)
+    else:
+        print("Train balancing: disabled")
+
+    train_loader = make_loader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        device=device,
+    )
+
+    val_loader = make_loader(
+        val_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        device=device,
+    )
+
+    in_ch = infer_in_channels(train_ds)
+    num_classes = infer_num_classes(train_ds, val_ds)
+
+    model = build_model(
+        args.model,
+        in_ch,
+        num_classes,
+    ).to(device)
+
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=args.lr,
+    )
+
+    metrics = train_one_split(
+        model=model,
+        optimizer=optimizer,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=device,
+        out_dir=Path("checkpoints") / dataset_name / f"{fs}hz" / args.model / "manual_split",
+        epochs=args.epochs,
+        early_stopping_patience=args.early_stopping_patience,
+        split_label="Manual split",
+    )
+
+    training_total_time = time.time() - training_start
+
+    print(f"\nBest validation F1  : {metrics['f1']:.4f}")
+    print(f"Total training time : {training_total_time / 60:.2f} minutes")
+
+    write_validation_table(
+        dataset_name=dataset_name,
+        fs=fs,
+        model_name=args.model,
+        split_mode="manual",
+        fold_results=[metrics],
+    )
+
+    del model
+    del optimizer
+    del train_loader
+    del val_loader
+    del train_ds
+    del val_ds
+
+    gc.collect()
+
+    if device == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+    return training_total_time, [metrics]
+
+
+# ================= RESULT WRITING =================
+
+def write_validation_table(dataset_name, fs, model_name, split_mode, fold_results):
     table_path = (
         Path("checkpoints")
         / dataset_name
@@ -818,7 +836,7 @@ def main():
     write_header = not table_path.exists()
 
     freq_str = f"{fs} Hz"
-    model_str = args.model
+    model_str = model_name
 
     acc_avg = float(np.mean([r["accuracy"] for r in fold_results]))
     f1_avg = float(np.mean([r["f1"] for r in fold_results]))
@@ -829,12 +847,13 @@ def main():
 
     with open(table_path, "a") as f:
         if write_header:
-            f.write("VALIDATION PERFORMANCE ACROSS SAMPLING FREQUENCIES (5-FOLD)\n")
-            f.write("=" * 140 + "\n\n")
+            f.write("VALIDATION PERFORMANCE ACROSS SAMPLING FREQUENCIES\n")
+            f.write("=" * 150 + "\n\n")
             f.write(
                 f"{'Model':<10}"
                 f"{'Freq':<10}"
-                f"{'Fold':<10}"
+                f"{'Mode':<12}"
+                f"{'Split':<14}"
                 f"{'Acc':<10}"
                 f"{'F1':<10}"
                 f"{'Prec':<10}"
@@ -842,18 +861,25 @@ def main():
                 f"{'MCC':<10}"
                 f"{'Time':<10}\n"
             )
-            f.write("-" * 90 + "\n")
+            f.write("-" * 110 + "\n")
 
         mid_row = (len(fold_results) // 2) + 1
 
         for i, r in enumerate(fold_results, 1):
             model_cell = model_str if i == mid_row else ""
             freq_cell = freq_str if i == mid_row else ""
+            mode_cell = split_mode if i == mid_row else ""
+
+            if split_mode == "manual":
+                split_cell = "Manual"
+            else:
+                split_cell = f"Fold {i}"
 
             f.write(
                 f"{model_cell:<10}"
                 f"{freq_cell:<10}"
-                f"{('Fold ' + str(i)):<10}"
+                f"{mode_cell:<12}"
+                f"{split_cell:<14}"
                 f"{r['accuracy']:<10.4f}"
                 f"{r['f1']:<10.4f}"
                 f"{r['precision']:<10.4f}"
@@ -862,46 +888,125 @@ def main():
                 f"{r['time_min']:<10.2f}\n"
             )
 
-        f.write(
-            f"{'':<10}{'':<10}{'Avg':<10}"
-            f"{acc_avg:<10.4f}"
-            f"{f1_avg:<10.4f}"
-            f"{prec_avg:<10.4f}"
-            f"{spec_avg:<10.4f}"
-            f"{mcc_avg:<10.4f}"
-            f"{time_avg:<10.2f}\n"
-        )
+        if len(fold_results) > 1:
+            f.write(
+                f"{'':<10}{'':<10}{'':<12}{'Avg':<14}"
+                f"{acc_avg:<10.4f}"
+                f"{f1_avg:<10.4f}"
+                f"{prec_avg:<10.4f}"
+                f"{spec_avg:<10.4f}"
+                f"{mcc_avg:<10.4f}"
+                f"{time_avg:<10.2f}\n"
+            )
 
-        f.write("-" * 90 + "\n")
+        f.write("-" * 110 + "\n")
 
     print(f"\nValidation table updated: {table_path}")
 
-    # ================= FINAL TEST =================
 
-    test_dir = data_dir / "test"
+def load_models_for_final_evaluation(
+    split_mode,
+    data_dir,
+    dataset_name,
+    fs,
+    model_name,
+    kfolds,
+    in_ch,
+    num_classes,
+    device,
+):
+    models = []
 
-    if not test_dir.exists():
-        print("\nTest folder not found — skipping test evaluation.")
+    if split_mode == "kfold":
+        for fold in range(1, kfolds + 1):
+            m = build_model(
+                model_name,
+                in_ch,
+                num_classes,
+            ).to(device)
+
+            best_model_path = (
+                Path("checkpoints")
+                / dataset_name
+                / f"{fs}hz"
+                / model_name
+                / f"fold_{fold}"
+                / "best.pt"
+            )
+
+            if not best_model_path.exists():
+                raise FileNotFoundError(f"Missing checkpoint: {best_model_path}")
+
+            m.load_state_dict(torch.load(best_model_path, map_location=device))
+            m.to(device)
+            models.append(m)
+
+        return models
+
+    if split_mode == "manual":
+        m = build_model(
+            model_name,
+            in_ch,
+            num_classes,
+        ).to(device)
+
+        best_model_path = (
+            Path("checkpoints")
+            / dataset_name
+            / f"{fs}hz"
+            / model_name
+            / "manual_split"
+            / "best.pt"
+        )
+
+        if not best_model_path.exists():
+            raise FileNotFoundError(f"Missing checkpoint: {best_model_path}")
+
+        m.load_state_dict(torch.load(best_model_path, map_location=device))
+        m.to(device)
+        models.append(m)
+
+        return models
+
+    raise ValueError(f"Unknown split_mode: {split_mode}")
+
+
+# ================= FINAL TEST =================
+
+def run_final_test(
+    data_dir,
+    dataset_name,
+    fs,
+    model_name,
+    batch_size,
+    kfolds,
+    split_mode,
+    device,
+    training_total_time=None,
+):
+    test_file = find_test_file(data_dir)
+
+    if test_file is None:
+        print("\nTest file not found — skipping test evaluation.")
+        print("Expected one of:")
+        print(f"  {data_dir / 'test' / 'test.pt'}")
+        print(f"  {data_dir / 'test.pt'}")
         return
 
     print("\n" + "=" * 70)
-    print("FINAL TEST EVALUATION (Ensemble of all folds' best epochs)")
+    if split_mode == "kfold":
+        print("FINAL TEST EVALUATION (Ensemble of all folds' best epochs)")
+    else:
+        print("FINAL TEST EVALUATION (Best manual-split checkpoint)")
     print("=" * 70)
 
-    test_data = torch.load(
-        test_dir / "test.pt",
-        map_location="cpu",
-    )
-
-    test_ds = ECGDataset.__new__(ECGDataset)
-    test_ds.X = test_data["X"]
-    test_ds.y = test_data["y"]
+    test_ds = tensor_file_to_dataset(test_file)
 
     print_dataset_stats("Test unbalanced", test_ds)
 
     test_loader = make_loader(
         test_ds,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         shuffle=False,
         device=device,
     )
@@ -915,38 +1020,25 @@ def main():
 
     test_balanced_loader = make_loader(
         test_balanced_ds,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         shuffle=False,
         device=device,
     )
 
-    in_ch = test_ds.X[0].shape[0]
-    num_classes = int(torch.max(test_ds.y).item() + 1)
+    in_ch = infer_in_channels(test_ds)
+    num_classes = infer_num_classes(test_ds)
 
-    models = []
-
-    for fold in range(1, args.kfolds + 1):
-        m = build_model(
-            args.model,
-            in_ch,
-            num_classes,
-        ).to(device)
-
-        best_model_path = (
-            Path("checkpoints")
-            / dataset_name
-            / f"{fs}hz"
-            / args.model
-            / f"fold_{fold}"
-            / "best.pt"
-        )
-
-        if not best_model_path.exists():
-            raise FileNotFoundError(f"Missing checkpoint: {best_model_path}")
-
-        m.load_state_dict(torch.load(best_model_path, map_location=device))
-        m.to(device)
-        models.append(m)
+    models = load_models_for_final_evaluation(
+        split_mode=split_mode,
+        data_dir=data_dir,
+        dataset_name=dataset_name,
+        fs=fs,
+        model_name=model_name,
+        kfolds=kfolds,
+        in_ch=in_ch,
+        num_classes=num_classes,
+        device=device,
+    )
 
     if device == "cuda":
         torch.cuda.synchronize()
@@ -1000,7 +1092,7 @@ def main():
         Path("checkpoints")
         / dataset_name
         / f"{fs}hz"
-        / args.model
+        / model_name
     )
 
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -1010,6 +1102,7 @@ def main():
         y_true=y_true_u,
         y_score=y_prob_u,
     )
+
     # ---------- ROC / AUROC / ECE: Balanced ----------
     y_true_b, y_prob_b = evaluate_ensemble_with_probs(
         models,
@@ -1039,13 +1132,17 @@ def main():
     thpt_u = len(test_ds) / (elapsed_u + 1e-12)
     thpt_b = len(test_balanced_ds) / (elapsed_b + 1e-12)
 
+    model_str = model_name
+    freq_str = f"{fs} Hz"
+
     with open(test_table_path, "a") as f:
         if write_header:
-            f.write("FINAL TEST PERFORMANCE (Ensemble of folds)\n")
-            f.write("=" * 130 + "\n\n")
+            f.write("FINAL TEST PERFORMANCE\n")
+            f.write("=" * 150 + "\n\n")
             f.write(
                 f"{'Model':<10}"
                 f"{'Freq':<10}"
+                f"{'Mode':<12}"
                 f"{'Test':<10}"
                 f"{'Acc':<10}"
                 f"{'F1':<10}"
@@ -1057,11 +1154,12 @@ def main():
                 f"{'Time(s)':<10}"
                 f"{'Thpt':<10}\n"
             )
-            f.write("-" * 130 + "\n")
+            f.write("-" * 140 + "\n")
 
         f.write(
             f"{model_str:<10}"
             f"{freq_str:<10}"
+            f"{split_mode:<12}"
             f"{'Unbal':<10}"
             f"{acc_u:<10.4f}"
             f"{f1_u:<10.4f}"
@@ -1077,19 +1175,20 @@ def main():
         f.write(
             f"{'':<10}"
             f"{'':<10}"
+            f"{'':<12}"
             f"{'Bal':<10}"
             f"{acc_b:<10.4f}"
             f"{f1_b:<10.4f}"
             f"{precision_b:<10.4f}"
             f"{specificity_b:<10.4f}"
             f"{mcc_b:<10.4f}"
-            f"{'':<10}"
-            f"{'':<10}"
+            f"{auroc_b:<10.4f}"
+            f"{ece_b:<10.4f}"
             f"{elapsed_b:<10.2f}"
             f"{thpt_b:<10.2f}\n"
         )
 
-        f.write("-" * 130 + "\n")
+        f.write("-" * 140 + "\n")
 
     print(f"\nMaster test table updated: {test_table_path}")
 
@@ -1104,8 +1203,17 @@ def main():
     fn_b, tp_b = cm_b[1]
 
     with open(results_path, "w") as f:
-        f.write("FINAL TEST RESULTS (Ensemble of all folds' best.pt)\n")
+        f.write("FINAL TEST RESULTS\n")
         f.write("=" * 60 + "\n\n")
+
+        f.write("RUN TYPE\n")
+        f.write("-" * 60 + "\n")
+        f.write(f"Split mode           : {split_mode}\n")
+        if split_mode == "kfold":
+            f.write(f"Folds ensembled      : {kfolds}\n")
+        else:
+            f.write("Folds ensembled      : 1 manual-split model\n")
+        f.write("\n")
 
         f.write("UNBALANCED TEST\n")
         f.write("-" * 60 + "\n")
@@ -1124,7 +1232,8 @@ def main():
         f.write(f"ECE                 : {ece_u:.4f}\n\n")
 
         f.write("PERFORMANCE\n")
-        f.write(f"Training time (total) : {training_total_min:.2f} minutes\n")
+        if training_total_time is not None:
+            f.write(f"Training time (total) : {training_total_time / 60:.2f} minutes\n")
         f.write(f"Inference time        : {elapsed_u:.2f} seconds\n")
         f.write(f"Throughput            : {thpt_u:.2f} samples/sec\n\n\n")
 
@@ -1140,7 +1249,9 @@ def main():
         f.write(f"Recall (Sensitivity): {recall_b:.4f}\n")
         f.write(f"Specificity         : {specificity_b:.4f}\n")
         f.write(f"Precision           : {precision_b:.4f}\n")
-        f.write(f"MCC                 : {mcc_b:.4f}\n\n")
+        f.write(f"MCC                 : {mcc_b:.4f}\n")
+        f.write(f"AUROC               : {auroc_b:.4f}\n")
+        f.write(f"ECE                 : {ece_b:.4f}\n\n")
 
         f.write("PERFORMANCE\n")
         f.write(f"Inference time        : {elapsed_b:.2f} seconds\n")
@@ -1150,23 +1261,14 @@ def main():
         f.write("=" * 60 + "\n")
         f.write(f"Dataset              : {dataset_name}\n")
         f.write(f"Sampling rate        : {fs} Hz\n")
-        f.write(f"Model                : {args.model}\n")
-        f.write(f"Folds ensembled      : {args.kfolds}\n")
+        f.write(f"Model                : {model_name}\n")
         f.write(f"Device               : {device}\n")
-        f.write(f"Training balance     : {args.train_balance}\n\n")
+        f.write(f"Split mode           : {split_mode}\n\n")
 
         f.write("DATASET SIZES\n")
         f.write("-" * 60 + "\n")
         f.write(f"Test samples (unbalanced) : {len(test_ds)}\n")
-        f.write(f"Test samples (balanced)   : {len(test_balanced_ds)}\n\n")
-
-        f.write("TRAINING SETTINGS\n")
-        f.write("-" * 60 + "\n")
-        f.write(f"Epochs (max)         : {args.epochs}\n")
-        f.write(f"Batch size           : {args.batch_size}\n")
-        f.write(f"Learning rate        : {args.lr}\n")
-        f.write(f"K-Folds              : {args.kfolds}\n")
-        f.write(f"Early stop patience  : {args.early_stopping_patience}\n")
+        f.write(f"Test samples (balanced)   : {len(test_balanced_ds)}\n")
 
     # ---------- Save confusion matrices ----------
     cm_csv_u = results_dir / "confusion_matrix_test_unbalanced.csv"
@@ -1210,15 +1312,17 @@ def main():
     print("Confusion Matrix (Test)")
     print(f"[[{tn_b:4d} {fp_b:3d}]")
     print(f" [{fn_b:4d} {tp_b:3d}]]\n")
-    print("F1        Accuracy   Recall(Sens)  Specificity  Precision MCC")
-    print("-" * 70)
+    print("F1        Accuracy   Recall(Sens)  Specificity  Precision MCC      AUROC    ECE")
+    print("-" * 90)
     print(
         f"{f1_b:<9.4f}"
         f"{acc_b:<11.4f}"
         f"{recall_b:<15.4f}"
         f"{specificity_b:<13.4f}"
         f"{precision_b:<10.4f}"
-        f"{mcc_b:<.4f}"
+        f"{mcc_b:<9.4f}"
+        f"{auroc_b:<9.4f}"
+        f"{ece_b:<.4f}"
     )
     print(f"\nInference time : {elapsed_b:.2f} seconds")
     print(f"Throughput     : {thpt_b:.2f} samples/sec")
@@ -1235,6 +1339,203 @@ def main():
     if device == "cuda":
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+
+
+# ================= TEST ONLY =================
+
+def run_test_only(
+    data_path,
+    model_name,
+    batch_size,
+    kfolds,
+    split_mode,
+    device,
+):
+    data_dir = Path(data_path)
+    fs = int(data_dir.name.replace("hz", ""))
+    dataset_name = data_dir.parent.name
+
+    print("\nTEST ONLY MODE")
+    print("=" * 60)
+    print(f"Device        : {device}")
+    print(f"Dataset       : {dataset_name}")
+    print(f"Sampling rate : {fs} Hz")
+    print(f"Model         : {model_name}")
+    print(f"Split mode    : {split_mode}")
+    print("=" * 60)
+
+    run_final_test(
+        data_dir=data_dir,
+        dataset_name=dataset_name,
+        fs=fs,
+        model_name=model_name,
+        batch_size=batch_size,
+        kfolds=kfolds,
+        split_mode=split_mode,
+        device=device,
+        training_total_time=None,
+    )
+
+
+# ================= MAIN =================
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--data_path", required=True)
+
+    parser.add_argument(
+        "--model",
+        choices=["cnn1d", "cnn_lstm"],
+        required=True,
+    )
+
+    parser.add_argument(
+        "--split_mode",
+        choices=["auto", "kfold", "manual"],
+        default="auto",
+        help=(
+            "Training split mode. "
+            "auto detects fold_*.pt or train.pt/val.pt; "
+            "kfold requires fold_1.pt ... fold_k.pt; "
+            "manual requires train.pt and val.pt."
+        ),
+    )
+
+    parser.add_argument(
+        "--test_only",
+        action="store_true",
+        help="Skip training and run final test evaluation only.",
+    )
+
+    parser.add_argument(
+        "--train_balance",
+        choices=["none", "downsample"],
+        default="downsample",
+        help=(
+            "Runtime balancing for training data only. "
+            "With kfold, it balances only the training folds. "
+            "With manual split, it balances only train.pt."
+        ),
+    )
+
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+    )
+
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=DEFAULT_EPOCHS,
+    )
+
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=DEFAULT_LEARNING_RATE,
+    )
+
+    parser.add_argument(
+        "--kfolds",
+        type=int,
+        default=DEFAULT_KFOLDS,
+    )
+
+    parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=DEFAULT_EARLY_STOPPING_PATIENCE,
+    )
+
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+    )
+
+    args = parser.parse_args()
+
+    set_seed(42)
+
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = args.device
+
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested, but torch.cuda.is_available() is False.")
+
+    data_dir = Path(args.data_path)
+
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Data path does not exist: {data_dir}")
+
+    fs = int(data_dir.name.replace("hz", ""))
+    dataset_name = data_dir.parent.name
+
+    split_mode = detect_split_mode(
+        data_dir=data_dir,
+        requested_mode=args.split_mode,
+        kfolds=args.kfolds,
+    )
+
+    print("=" * 70)
+    print("ECG TRAINING")
+    print("=" * 70)
+    print(f"Device        : {device}")
+    print(f"Dataset       : {dataset_name}")
+    print(f"Sampling rate : {fs} Hz")
+    print(f"Model         : {args.model}")
+    print(f"Batch size    : {args.batch_size}")
+    print(f"Epochs        : {args.epochs}")
+    print(f"LR            : {args.lr}")
+    print(f"Split mode    : {split_mode}")
+    if split_mode == "kfold":
+        print(f"K-folds       : {args.kfolds}")
+    print(f"Train balance : {args.train_balance}")
+    print("=" * 70)
+
+    if args.test_only:
+        run_test_only(
+            data_path=args.data_path,
+            model_name=args.model,
+            batch_size=args.batch_size,
+            kfolds=args.kfolds,
+            split_mode=split_mode,
+            device=device,
+        )
+        return
+
+    if split_mode == "kfold":
+        training_total_time, _ = train_kfold(
+            args=args,
+            data_dir=data_dir,
+            fs=fs,
+            dataset_name=dataset_name,
+            device=device,
+        )
+    else:
+        training_total_time, _ = train_manual_split(
+            args=args,
+            data_dir=data_dir,
+            fs=fs,
+            dataset_name=dataset_name,
+            device=device,
+        )
+
+    run_final_test(
+        data_dir=data_dir,
+        dataset_name=dataset_name,
+        fs=fs,
+        model_name=args.model,
+        batch_size=args.batch_size,
+        kfolds=args.kfolds,
+        split_mode=split_mode,
+        device=device,
+        training_total_time=training_total_time,
+    )
 
 
 if __name__ == "__main__":
