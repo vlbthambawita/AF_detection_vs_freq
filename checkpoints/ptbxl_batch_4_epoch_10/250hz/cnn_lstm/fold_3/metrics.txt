@@ -1,0 +1,26 @@
+BEST VALIDATION METRICS
+============================================================
+
+Split              : fold_3
+Best epoch         : 18
+Validation loss    : 0.0482
+Validation F1      : 0.9728
+Validation Accuracy: 0.9920
+
+CONFUSION MATRIX (VAL)
+[[1491 10]
+ [4 250]]
+
+DERIVED METRICS
+Recall (Sensitivity): 0.9843
+Specificity         : 0.9933
+Precision           : 0.9615
+MCC                 : 0.9682
+
+RUNTIME
+Training time (sec): 259.20
+Training time (min): 4.32
+
+RUN INFO
+------------------------------------------------------------
+Random seed        : 42
