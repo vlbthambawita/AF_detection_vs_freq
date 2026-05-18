@@ -171,7 +171,6 @@ def parse_args():
         "--freqs",
         nargs="+",
         default=DEFAULT_FREQS,
-        choices=DEFAULT_FREQS,
         help="Sampling frequencies to plot. Example: --freqs 250hz",
     )
 

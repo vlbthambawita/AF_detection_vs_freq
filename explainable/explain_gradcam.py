@@ -18,7 +18,7 @@ from models.cnn_lstm import CNN_LSTM_ECG
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Ensemble Grad-CAM on ECG Data")
-    parser.add_argument("--frequency", type=str, required=True, choices=["62", "100", "250", "500"])
+    parser.add_argument("--frequency", type=str, required=True)
     parser.add_argument("--model_type", type=str, required=True, choices=["cnn1d", "cnn_lstm"])
     parser.add_argument("--sample_idx", type=int, default=None)
     parser.add_argument("--representative_case", type=str, default=None,
