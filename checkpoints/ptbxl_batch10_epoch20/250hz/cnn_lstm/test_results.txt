@@ -1,0 +1,63 @@
+FINAL TEST RESULTS
+============================================================
+
+RUN TYPE
+------------------------------------------------------------
+Split mode           : kfold
+Folds ensembled      : 5
+
+UNBALANCED TEST
+------------------------------------------------------------
+CONFUSION MATRIX (TEST)
+[[1877  18]
+ [4   284]]
+
+METRICS
+Accuracy            : 0.9899
+F1-score            : 0.9627
+Recall (Sensitivity): 0.9861
+Specificity         : 0.9905
+Precision           : 0.9404
+MCC                 : 0.9572
+AUROC               : 0.9980
+ECE                 : 0.0089
+
+PERFORMANCE
+Training time (total) : 7.07 minutes
+Inference time        : 3.83 seconds
+Throughput            : 570.29 samples/sec
+
+
+BALANCED TEST (DOWNSAMPLED MAJORITY)
+------------------------------------------------------------
+CONFUSION MATRIX (TEST)
+[[285  3]
+ [4   284]]
+
+METRICS
+Accuracy            : 0.9878
+F1-score            : 0.9878
+Recall (Sensitivity): 0.9861
+Specificity         : 0.9896
+Precision           : 0.9895
+MCC                 : 0.9757
+AUROC               : 0.9983
+ECE                 : 0.0084
+
+PERFORMANCE
+Inference time        : 1.11 seconds
+Throughput            : 517.89 samples/sec
+
+
+RUN INFORMATION
+============================================================
+Dataset              : ptbxl_batch10_epoch20
+Sampling rate        : 250 Hz
+Model                : cnn_lstm
+Device               : cuda
+Split mode           : kfold
+
+DATASET SIZES
+------------------------------------------------------------
+Test samples (unbalanced) : 2183
+Test samples (balanced)   : 576
