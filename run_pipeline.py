@@ -1945,7 +1945,7 @@ class PipelineGUI(tk.Tk):
         )
 
     def run_confusion(self) -> None:
-        script = self._find_script(["src/plotting/confiousion_matrix_2x2.py"])
+        script = self._find_script(["src/plotting/confusion_matrix_2x2.py"])
 
         if not script:
             return
