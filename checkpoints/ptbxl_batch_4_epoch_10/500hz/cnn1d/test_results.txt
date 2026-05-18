@@ -4,49 +4,49 @@ FINAL TEST RESULTS
 RUN TYPE
 ------------------------------------------------------------
 Split mode           : kfold
-Folds ensembled      : 5
+Folds ensembled      : 2
 
 UNBALANCED TEST
 ------------------------------------------------------------
 CONFUSION MATRIX (TEST)
-[[1866  29]
- [22   266]]
+[[1845  50]
+ [33   255]]
 
 METRICS
-Accuracy            : 0.9766
-F1-score            : 0.9125
-Recall (Sensitivity): 0.9236
-Specificity         : 0.9847
-Precision           : 0.9017
-MCC                 : 0.8991
-AUROC               : 0.9889
-ECE                 : 0.0169
+Accuracy            : 0.9620
+F1-score            : 0.8600
+Recall (Sensitivity): 0.8854
+Specificity         : 0.9736
+Precision           : 0.8361
+MCC                 : 0.8385
+AUROC               : 0.9792
+ECE                 : 0.0285
 
 PERFORMANCE
-Training time (total) : 5.01 minutes
-Inference time        : 4.15 seconds
-Throughput            : 525.46 samples/sec
+Training time (total) : 1.69 minutes
+Inference time        : 2.24 seconds
+Throughput            : 974.78 samples/sec
 
 
 BALANCED TEST (DOWNSAMPLED MAJORITY)
 ------------------------------------------------------------
 CONFUSION MATRIX (TEST)
-[[286  2]
- [22   266]]
+[[281  7]
+ [33   255]]
 
 METRICS
-Accuracy            : 0.9583
-F1-score            : 0.9568
-Recall (Sensitivity): 0.9236
-Specificity         : 0.9931
-Precision           : 0.9925
-MCC                 : 0.9189
-AUROC               : 0.9907
-ECE                 : 0.0365
+Accuracy            : 0.9306
+F1-score            : 0.9273
+Recall (Sensitivity): 0.8854
+Specificity         : 0.9757
+Precision           : 0.9733
+MCC                 : 0.8646
+AUROC               : 0.9819
+ECE                 : 0.0444
 
 PERFORMANCE
-Inference time        : 1.11 seconds
-Throughput            : 521.06 samples/sec
+Inference time        : 0.59 seconds
+Throughput            : 983.34 samples/sec
 
 
 RUN INFORMATION
